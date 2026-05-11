@@ -1,0 +1,7 @@
+PySide6>=6.7
+anthropic>=0.40
+mss>=9.0
+pywin32>=306
+Pillow>=10.0
+pynput>=1.7
+keyring>=24.0
