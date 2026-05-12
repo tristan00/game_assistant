@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: Run pytest
+        run: pytest -v
+
+  release:
+    needs: test
+    # Only release when pushing to main, and skip if the commit is itself a bump (loop guard).
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      !contains(github.event.head_commit.message, '[skip release]')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Determine bump segment
+        id: segment
+        shell: bash
+        run: |
+          msg=$(git log -1 --pretty=%B)
+          echo "commit message: $msg"
+          if echo "$msg" | grep -qE '\[bump:major\]'; then
+            echo "value=major" >> "$GITHUB_OUTPUT"
+          elif echo "$msg" | grep -qE '\[bump:minor\]'; then
+            echo "value=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version
+        id: bump
+        shell: bash
+        run: |
+          new_version=$(python scripts/bump_version.py ${{ steps.segment.outputs.value }})
+          echo "new version: $new_version"
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit bump and create tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/__init__.py
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }} [skip release]"
+          git tag "v${{ steps.bump.outputs.version }}"
+
+      - name: Build exe
+        run: pyinstaller game_assistant.spec
+
+      - name: Sanity check artifact
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/game_assistant.exe")) { throw "build did not produce dist/game_assistant.exe" }
+          Get-Item "dist/game_assistant.exe" | Select-Object Name, Length
+
+      - name: Push bump commit and tag
+        shell: bash
+        run: |
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          files: dist/game_assistant.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
