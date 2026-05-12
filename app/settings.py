@@ -1,42 +1,67 @@
+import json
 import logging
-
-from PySide6.QtCore import QSettings
+import tempfile
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-ORG = "game_assistant"
-APP = "game_assistant"
+SETTINGS_PATH = Path.home() / "game_assistant" / "settings.json"
 
 DEFAULTS: dict = {
     "interval_seconds": 60,
     "last_n": 5,
     "model": "claude-sonnet-4-6",
     "hotkey_qt": "Ctrl+Alt+S",
+    "active_strategy": "",
+    "web_search_max_uses": 2,
 }
 
 
-def _qs() -> QSettings:
-    return QSettings(ORG, APP)
-
-
 def load_settings() -> dict:
-    qs = _qs()
-    s = {
-        "interval_seconds": int(qs.value("interval_seconds", DEFAULTS["interval_seconds"])),
-        "last_n": int(qs.value("last_n", DEFAULTS["last_n"])),
-        "model": str(qs.value("model", DEFAULTS["model"])),
-        "hotkey_qt": str(qs.value("hotkey_qt", DEFAULTS["hotkey_qt"])),
-    }
-    logger.info("loaded settings: %s", s)
+    s = dict(DEFAULTS)
+    if SETTINGS_PATH.exists():
+        try:
+            raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            for key in DEFAULTS:
+                if key in raw:
+                    s[key] = _coerce(key, raw[key])
+            logger.info("loaded settings from %s: %s", SETTINGS_PATH, s)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error("failed to read settings file %s: %r; using defaults", SETTINGS_PATH, exc)
+    else:
+        logger.info("no settings file at %s; using defaults: %s", SETTINGS_PATH, s)
     return s
 
 
-def save_settings(s: dict) -> None:
-    qs = _qs()
-    for key, value in s.items():
-        qs.setValue(key, value)
-    qs.sync()
-    logger.info("saved settings: %s", s)
+def save_settings(updates: dict) -> None:
+    current = load_settings()
+    for key, value in updates.items():
+        if key in DEFAULTS:
+            current[key] = _coerce(key, value)
+        else:
+            logger.warning("save_settings: ignoring unknown key %r", key)
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: tmpfile + rename. Avoids half-written JSON if interrupted.
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="settings_", suffix=".tmp", dir=str(SETTINGS_PATH.parent))
+    try:
+        with open(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(current, f, indent=2, sort_keys=True)
+        Path(tmp_path).replace(SETTINGS_PATH)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+    logger.info("saved settings: %s", updates)
+
+
+def _coerce(key: str, value) -> object:
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        return bool(value)
+    if isinstance(default, int):
+        return int(value)
+    if isinstance(default, str):
+        return str(value)
+    return value
 
 
 def qt_hotkey_to_pynput(seq: str) -> str:

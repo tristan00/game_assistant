@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>game_assistant</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Window row -->
+    <div class="row">
+      <label>Window:</label>
+      <select id="window-select" class="grow"></select>
+      <button id="refresh-btn">Refresh</button>
+      <button id="capture-btn">Capture</button>
+    </div>
+
+    <!-- Session row -->
+    <div class="row">
+      <span id="session-label" class="grow muted">Active session: — (0 shots)</span>
+      <label>Interval:</label>
+      <input id="interval-input" type="number" min="5" max="3600" value="60" />
+      <span class="muted">s</span>
+      <button id="new-session-btn">New session</button>
+    </div>
+
+    <!-- Model row -->
+    <div class="row">
+      <label>Model:</label>
+      <select id="model-select"></select>
+      <label>Last N:</label>
+      <input id="last-n-input" type="number" min="1" max="20" value="5" />
+      <label>Web searches:</label>
+      <input id="web-search-input" type="number" min="0" max="10" value="2"
+             title="Max web searches per request. 0 disables. Each search adds latency and cost." />
+      <span class="grow"></span>
+      <button id="settings-btn" class="ghost">Settings…</button>
+      <button id="api-key-btn" class="ghost">API key…</button>
+    </div>
+
+    <!-- Strategy -->
+    <div class="row">
+      <label>Strategy:</label>
+      <select id="strategy-select" class="grow"></select>
+      <button id="new-strategy-btn">+ New</button>
+      <button id="edit-strategy-btn">Edit</button>
+      <button id="save-strategy-btn" disabled>Save</button>
+      <button id="delete-strategy-btn">Delete</button>
+    </div>
+    <textarea id="strategy-editor" rows="6" readonly
+              placeholder="Optional persistent strategy/campaign overview the assistant will use to shape its analysis. Pick a strategy (or click + New), then click Edit to modify, Save to write to disk."></textarea>
+
+    <!-- Question -->
+    <label class="question-label">Question (Enter to submit, Shift+Enter for newline):</label>
+    <textarea id="question" rows="3"></textarea>
+
+    <div class="row submit-row">
+      <span class="grow"></span>
+      <button id="submit-btn">Submit</button>
+    </div>
+
+    <!-- Pending banner -->
+    <div id="pending" class="pending hidden"></div>
+
+    <!-- Chat -->
+    <label class="chat-label">Chat:</label>
+    <div id="chat" class="chat"></div>
+
+    <!-- Footer -->
+    <div id="status" class="muted">Pick a window. Capture starts automatically.</div>
+    <div class="muted small">Manual capture: click Capture or press <span id="hotkey-hint">Ctrl+Alt+S</span></div>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Settings</h3>
+      <div class="form">
+        <label>Model:</label>
+        <select id="settings-model"></select>
+        <label>Capture interval (s):</label>
+        <input id="settings-interval" type="number" min="5" max="3600" />
+        <label>Last N images sent:</label>
+        <input id="settings-last-n" type="number" min="1" max="20" />
+        <label>Web searches per request (max):</label>
+        <input id="settings-web-search" type="number" min="0" max="10" />
+        <label>Global hotkey:</label>
+        <input id="settings-hotkey" type="text" placeholder="Ctrl+Alt+S" />
+      </div>
+      <p class="muted small">All settings apply immediately on Save and persist across launches.</p>
+      <div class="modal-actions">
+        <button id="settings-cancel" class="ghost">Cancel</button>
+        <button id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- API key modal -->
+  <div id="api-key-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3 id="api-key-title">Anthropic API key</h3>
+      <p>Enter your Anthropic API key. Don't have one? Create an account and generate a key at
+        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+      </p>
+      <p class="muted small">Stored on your machine in the OS keystore. The app works without a key for capture only; the key is needed to ask the assistant questions.</p>
+      <input id="api-key-input" type="password" placeholder="sk-ant-…" />
+      <div class="modal-actions">
+        <button id="api-key-cancel" class="ghost">Cancel</button>
+        <button id="api-key-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

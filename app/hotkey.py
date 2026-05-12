@@ -1,26 +1,37 @@
 import logging
+from typing import Callable
 
 from pynput import keyboard
-from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_HOTKEY = "<ctrl>+<alt>+s"
 
 
-class HotkeyManager(QObject):
-    triggered = Signal()
+class HotkeyManager:
+    """Listens for a global hotkey via pynput and invokes a callback when fired.
 
-    def __init__(self, hotkey: str = DEFAULT_HOTKEY, parent: QObject | None = None) -> None:
-        super().__init__(parent)
+    The callback runs on pynput's listener thread. Callers must ensure the
+    callback is thread-safe (e.g. uses locks or marshals work onto another loop).
+    """
+
+    def __init__(self, hotkey: str = DEFAULT_HOTKEY, callback: Callable[[], None] | None = None) -> None:
         self._hotkey = hotkey
+        self._callback = callback
         self._listener: keyboard.GlobalHotKeys | None = None
+
+    def set_callback(self, callback: Callable[[], None]) -> None:
+        self._callback = callback
+        logger.info("hotkey callback set")
 
     def start(self) -> None:
         if self._listener is not None:
             return
         if not self._hotkey:
             logger.warning("hotkey listener not started: hotkey is empty")
+            return
+        if self._callback is None:
+            logger.warning("hotkey listener not started: no callback set")
             return
         try:
             self._listener = keyboard.GlobalHotKeys({self._hotkey: self._fire})
@@ -47,6 +58,12 @@ class HotkeyManager(QObject):
         logger.info("hotkey listener stopped")
 
     def _fire(self) -> None:
-        # Called on pynput's thread; Qt auto-marshals across threads via queued connection.
         logger.debug("hotkey fired")
-        self.triggered.emit()
+        cb = self._callback
+        if cb is None:
+            logger.warning("hotkey fired but no callback registered")
+            return
+        try:
+            cb()
+        except Exception:
+            logger.exception("hotkey callback raised")
