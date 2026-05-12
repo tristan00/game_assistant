@@ -15,36 +15,15 @@ Vision API requests are billed against your Anthropic account. Pricing: <https:/
 
 ---
 
-## 2. Build the `.exe` (recommended)
+## 2. Download and run
 
-Requirements: **Windows 10/11**, **Python 3.11+**. Windows 11 ships the Edge WebView2 runtime in-box, which is what renders the UI. On Windows 10 most up-to-date installs have it via Edge; if you hit a "WebView2 not found" error, install <https://developer.microsoft.com/en-us/microsoft-edge/webview2/>.
+**Requirements**: Windows 10 or 11. Windows 11 ships the Edge WebView2 runtime in-box, which is what renders the UI. On Windows 10 most up-to-date installs have it via Edge; if you hit a "WebView2 not found" error, install <https://developer.microsoft.com/en-us/microsoft-edge/webview2/>.
 
-```powershell
-git clone <this-repo> game_assistant
-cd game_assistant
+1. Go to the [Releases page](https://github.com/tristan00/game_assistant/releases/latest).
+2. Download `game_assistant.exe`.
+3. Double-click to run. No Python, no clone, no build step.
 
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements-dev.txt
-
-pyinstaller game_assistant.spec
-```
-
-Output: `dist\game_assistant.exe` (single file, no console window). Double-click to run; no Python needed on the target machine.
-
-Logs (helpful when something misbehaves on a console-less .exe): `%USERPROFILE%\game_assistant\logs\run.log`.
-
-### Architecture (so the run modes make sense)
-
-The exe is a thin native shell. It boots a local FastAPI server (`uvicorn`) on a random localhost port in-process, then renders the web UI inside a chromeless desktop window via `pywebview` + Edge WebView2. From the user's perspective it looks like a regular desktop app — no browser tab, no URL bar. There is no separate server to manage and nothing is exposed off-machine.
-
-### Running from source
-
-```powershell
-pip install -r requirements.txt
-python main.py            # default: native desktop window (same UX as the .exe)
-python main.py --web      # headless/dev mode: serves http://127.0.0.1:8765 and opens your system browser (useful for HTML/CSS/JS iteration with browser devtools)
-```
+Logs land at `%USERPROFILE%\game_assistant\logs\run.log` (useful if something misbehaves on a console-less exe).
 
 ---
 
@@ -118,3 +97,60 @@ All settings persist across launches:
 - **API errors in red in the Chat panel** — Full error and traceback are shown. Common causes: invalid API key, no network, insufficient credits.
 - **App hangs longer than 2 minutes** — Check `~/game_assistant/logs/run.log`. The 120s request timeout should surface an error in the log if the API call is the cause.
 - **Hotkey doesn't fire** — Some games capture all input. Try alt-tabbing out, or change to a less common chord under **Settings…**.
+
+---
+
+## For developers
+
+### Architecture
+
+The exe is a thin native shell. It boots a local FastAPI server (`uvicorn`) on a random localhost port in-process, then renders the web UI (`app/static/`) inside a chromeless desktop window via `pywebview` + Edge WebView2. There is no separate server to manage and nothing is exposed off-machine. From the user's perspective it looks like a regular desktop app — no browser tab, no URL bar.
+
+### Run from source
+
+Requires Python 3.11+.
+
+```powershell
+git clone https://github.com/tristan00/game_assistant.git
+cd game_assistant
+
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements-dev.txt
+
+python main.py            # default: native desktop window (same UX as the released exe)
+python main.py --web      # headless/dev mode: serves http://127.0.0.1:8765 and opens your system browser (useful for devtools-driven iteration on the HTML/CSS/JS)
+```
+
+### Build the exe locally
+
+Normally CI does this for you on every push to `main` (see below). To build it yourself:
+
+```powershell
+pyinstaller game_assistant.spec
+```
+
+Output: `dist\game_assistant.exe` — single file, no console window.
+
+### Tests
+
+```powershell
+pytest -v
+```
+
+Covers `image_utils`, `session`, `strategies`, `settings`, `config` (mocked keyring), `prompts`, `assistant_client` (mocked Anthropic client), the `bump_version` script, and the `web_server` REST + WebSocket surface (via FastAPI TestClient). Capture/hotkey/pywebview edges are deferred — they need a real OS surface and are best validated by running the app.
+
+### CI / release pipeline
+
+`.github/workflows/ci.yml` runs on every push and PR.
+
+- **test job**: pytest on `windows-latest`.
+- **release job** (only on push to `main`, after test passes):
+  1. Reads a bump segment from the head commit message: `[bump:major]`, `[bump:minor]`, or default `patch`.
+  2. Bumps `__version__` in `app/__init__.py` via `scripts/bump_version.py`.
+  3. Tags the commit as `vX.Y.Z`.
+  4. Runs `pyinstaller game_assistant.spec`.
+  5. Pushes the bump commit + tag back to `main`.
+  6. Publishes a GitHub Release with `dist/game_assistant.exe` attached.
+
+To skip releasing for a specific push, include `[skip release]` in the commit message — the bump-back commit uses this marker itself so it doesn't loop.
