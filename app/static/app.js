@@ -74,7 +74,6 @@ let state = {
   hasPerceptionSchema: false,
   quickRefBuilding: false,
   schemaBuilding: false,
-  windowUnreachable: false,
 };
 
 let pendingTickHandle = null;
@@ -209,7 +208,6 @@ function renderSession(folder, total) {
 function renderGameStatus() {
   const parts = [];
   if (!state.hasApiKey) parts.push("⚠ No API key (click 'API key…')");
-  if (state.windowUnreachable) parts.push("⚠ window unreachable");
 
   if (state.selectedHwnd === null) {
     parts.unshift("Game: — (pick a window)");
@@ -265,10 +263,10 @@ function applyActiveGame(ev) {
   state.activeGameWikiUrl = ev.wiki_url || null;
   state.identifyingStage = null;
   state.crawlProgress = null;
-  // Game changed — reset per-game ingredient state until the snapshot or
-  // subsequent events tell us what's actually on disk.
-  state.hasQuickRef = false;
-  state.hasPerceptionSchema = false;
+  // Backend carries fresh on-disk state in the event payload now, so we
+  // can trust it directly instead of zeroing and waiting for build events.
+  state.hasQuickRef = !!ev.has_quick_ref;
+  state.hasPerceptionSchema = !!ev.has_perception_schema;
   state.quickRefBuilding = false;
   state.schemaBuilding = false;
   if (state.activeGameWikiUrl) {
@@ -546,7 +544,6 @@ function handleWsEvent(msg) {
       }
       state.quickRefBuilding = false;
       state.schemaBuilding = false;
-      state.windowUnreachable = false;
       renderGameStatus();
       if (s.in_flight) {
         state.inFlight = true;
@@ -564,17 +561,14 @@ function handleWsEvent(msg) {
     case "capture_saved":
       renderSession(msg.session_folder, msg.total_shots);
       setStatus(`${msg.source}: saved ${msg.filename} (${msg.bytes.toLocaleString()} bytes)`);
-      if (state.windowUnreachable) {
-        state.windowUnreachable = false;
-        renderGameStatus();
-      }
       break;
     case "capture_error":
-      // Silent retry: surface as a passive status indicator that auto-clears
-      // on the next successful capture. Don't kill the timer or push a modal.
-      state.windowUnreachable = true;
+      setStatus(`Capture failed (${msg.source}): ${msg.error ? msg.error.split('\n').pop() : 'see logs'}`);
+      break;
+    case "window_lost":
+      state.selectedHwnd = null;
+      setStatus(`Selected window (hwnd ${msg.hwnd}) is gone — pick a window again (the game may have rebuilt its handle on a fullscreen toggle).`);
       renderGameStatus();
-      setStatus(`Capture failed (${msg.source}) — will retry on next tick.`);
       break;
     case "session_changed":
       renderSession(msg.folder_name, msg.total_shots);
@@ -609,7 +603,12 @@ function handleWsEvent(msg) {
       state.wikiStage = "not_found";
       state.activeGameCrawlState = "none";
       renderGameStatus();
-      setStatus(`No wiki found for ${msg.display_name}. Fix in Settings → Game knowledge sources.`);
+      setStatus(`No wiki found for ${msg.display_name} — this game is unsupported in this version (${msg.reason || "see logs"}).`);
+      break;
+    case "wiki_discovery_failed":
+      state.wikiStage = "discovery_failed";
+      renderGameStatus();
+      setStatus(`Wiki discovery hit a transient failure for ${msg.display_name}; will retry on next event.`);
       break;
     case "crawl_started":
       state.activeGameCrawlState = "running";

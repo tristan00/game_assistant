@@ -178,42 +178,44 @@ def main() -> int:
             ans3 = _submit(client, "Given your previous answer, what should I prioritize for my next 3 turns?")
             logger.info("A3 complete in %.1fs: %d chars", time.monotonic() - t0, len(ans3))
 
-            # ---- B. Missing-ingredient paths — submit must SUCCEED ----
-            log_path = Path.home() / "game_assistant" / "logs" / "run.log"
-
-            logger.info("==== B1: rename _perception_schema.md away → submit must succeed ====")
+            # ---- B. Missing-prerequisite paths — submit must FAIL LOUD with 412 ----
+            #
+            # The submit boundary now refuses (HTTP 412) when any required
+            # artifact is missing for the active game. No compose-without
+            # fallback. The raw error floats up to the caller.
+            logger.info("==== B1: rename _perception_schema.md away → submit must return 412 ====")
             schema_backup = schema_path.with_suffix(".md.e2e_backup")
             shutil.move(str(schema_path), str(schema_backup))
             try:
-                log_size_before = log_path.stat().st_size if log_path.exists() else 0
-                ans_b1 = _submit(client, "Brief sanity question (perception schema missing).")
-                logger.info("B1: submit succeeded (%d chars)", len(ans_b1))
-                tail = log_path.read_text(encoding="utf-8", errors="replace")[log_size_before:]
-                if "perception: skipped" not in tail:
+                r = client.post("/api/submit", json={"question": "should be rejected"})
+                if r.status_code != 412:
                     failures.append(
-                        "B1: submit succeeded but log doesn't show 'perception: skipped' — "
-                        "perception may have run despite missing schema"
+                        f"B1: expected 412 with schema missing, got {r.status_code}: {r.text[:200]}"
                     )
-            except Exception as exc:
-                failures.append(f"B1 failed (submit should have succeeded): {exc}")
+                elif "perception schema" not in r.text:
+                    failures.append(
+                        f"B1: 412 returned but detail doesn't mention 'perception schema': {r.text[:200]}"
+                    )
+                else:
+                    logger.info("B1: got expected 412 (%s)", r.json().get("detail", "")[:160])
             finally:
                 shutil.move(str(schema_backup), str(schema_path))
 
-            logger.info("==== B2: rename _quick_ref.md away → submit must succeed ====")
+            logger.info("==== B2: rename _quick_ref.md away → submit must return 412 ====")
             quick_ref_backup = quick_ref_path.with_suffix(".md.e2e_backup")
             shutil.move(str(quick_ref_path), str(quick_ref_backup))
             try:
-                log_size_before = log_path.stat().st_size if log_path.exists() else 0
-                ans_b2 = _submit(client, "Brief sanity question (quick_ref missing).")
-                logger.info("B2: submit succeeded (%d chars)", len(ans_b2))
-                tail = log_path.read_text(encoding="utf-8", errors="replace")[log_size_before:]
-                if "quick_ref=absent" not in tail:
+                r = client.post("/api/submit", json={"question": "should be rejected"})
+                if r.status_code != 412:
                     failures.append(
-                        "B2: submit succeeded but log doesn't show 'quick_ref=absent' — "
-                        "ingredient tracking may not be wired"
+                        f"B2: expected 412 with quick_ref missing, got {r.status_code}: {r.text[:200]}"
                     )
-            except Exception as exc:
-                failures.append(f"B2 failed (submit should have succeeded): {exc}")
+                elif "quick_ref" not in r.text:
+                    failures.append(
+                        f"B2: 412 returned but detail doesn't mention 'quick_ref': {r.text[:200]}"
+                    )
+                else:
+                    logger.info("B2: got expected 412 (%s)", r.json().get("detail", "")[:160])
             finally:
                 shutil.move(str(quick_ref_backup), str(quick_ref_path))
 

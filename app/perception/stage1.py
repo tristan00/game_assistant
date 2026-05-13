@@ -1,36 +1,28 @@
-"""Stage 1: per-screenshot enumeration with sidecar JSON caching.
+"""Stage 1: per-screenshot enumeration.
 
-Each PNG gets a ``<stem>.json`` sidecar containing the model's enumeration
-of the game state slots. Cached: a second call for the same file is a no-op
-that returns the existing sidecar (unless ``force=True``).
+For each PNG, the model returns the game state slots named by the per-game
+perception schema. Run in parallel across the batch. No on-disk caching —
+every submit calls the LLM fresh per image.
 
 Verbose logging is intentional — every enumeration is logged slot-by-slot
 so it's clear what the model perceived.
 """
 
 import base64
-import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
 
 from app.image_utils import downscale_to_jpeg
-from app.perception.schema import schema_hash
 from app.prompts import PERCEPTION_STAGE1_PROMPT
 from app.wiki.discovery import _parse_json_block
 
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 90.0
-SCHEMA_VERSION = 1
-
-
-def sidecar_path(image_path: Path) -> Path:
-    return image_path.with_suffix(".json")
 
 
 def enumerate_images(
@@ -42,12 +34,11 @@ def enumerate_images(
     game_id: str | None,
     max_workers: int = 8,
     log_tag: str = "stage1",
-) -> list[dict | None]:
+) -> list[dict]:
     """Parallel stage-1 enumeration over a list of images.
 
-    Cache hits are resolved per-image; cache misses dispatch concurrently
-    via a thread pool. Anthropic API tolerates ~5–10 concurrent vision
-    calls without issue for short bursts.
+    Anthropic API tolerates ~5–10 concurrent vision calls without issue for
+    short bursts. Any image failure raises and aborts the batch.
     """
     if not image_paths:
         return []
@@ -58,7 +49,7 @@ def enumerate_images(
         log_tag, len(image_paths), workers,
     )
 
-    def _one(p: Path) -> dict | None:
+    def _one(p: Path) -> dict:
         return enumerate_image(
             p,
             api_key=api_key,
@@ -70,10 +61,9 @@ def enumerate_images(
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stage1") as ex:
         results = list(ex.map(_one, image_paths))
-    filled = sum(1 for r in results if r is not None)
     logger.info(
-        "%s enumerate_images done in %.2fs filled=%d/%d",
-        log_tag, time.monotonic() - t, filled, len(results),
+        "%s enumerate_images done in %.2fs count=%d",
+        log_tag, time.monotonic() - t, len(results),
     )
     return results
 
@@ -85,53 +75,10 @@ def enumerate_image(
     model: str,
     schema_text: str,
     game_id: str | None,
-    force: bool = False,
     log_tag: str = "stage1",
-) -> dict | None:
-    """Return the sidecar dict for ``image_path``, computing + writing it on miss.
-
-    Cache key is the screenshot file. If a sidecar already exists (and
-    ``force`` is False), return it without calling the LLM.
-    """
-    sp = sidecar_path(image_path)
-    if not force and sp.exists():
-        try:
-            cached = json.loads(sp.read_text(encoding="utf-8"))
-            logger.info(
-                "%s cache hit: %s (schema_hash=%s, model=%s)",
-                log_tag, image_path.name,
-                cached.get("schema_hash"), cached.get("model"),
-            )
-            return cached
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("%s sidecar %s unreadable (%r); re-enumerating", log_tag, sp, exc)
-
-    if not image_path.exists():
-        raise FileNotFoundError(f"stage1: image missing: {image_path}")
-
-    return _enumerate_uncached(
-        image_path=image_path,
-        sidecar_target=sp,
-        api_key=api_key,
-        model=model,
-        schema_text=schema_text,
-        game_id=game_id,
-        log_tag=log_tag,
-    )
-
-
-def _enumerate_uncached(
-    *,
-    image_path: Path,
-    sidecar_target: Path,
-    api_key: str,
-    model: str,
-    schema_text: str,
-    game_id: str | None,
-    log_tag: str,
-) -> dict | None:
-    jpeg = downscale_to_jpeg(image_path)  # raises on disk/PIL errors — let it propagate
-
+) -> dict:
+    """Return ``{"slots": {...}, "raw_text": str}`` for ``image_path``."""
+    jpeg = downscale_to_jpeg(image_path)
     system_text = PERCEPTION_STAGE1_PROMPT + "\n\n---\n\n" + schema_text
     messages = [{
         "role": "user",
@@ -173,21 +120,14 @@ def _enumerate_uncached(
         )
 
     sidecar = {
-        "schema_version": SCHEMA_VERSION,
-        "screenshot": image_path.name,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
-        "model": model,
-        "game_id": game_id,
-        "schema_hash": schema_hash(schema_text),
         "slots": parsed.get("slots", {}),
         "raw_text": parsed.get("raw_text", ""),
     }
-    sidecar_target.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
-    log_sidecar(sidecar, log_tag=log_tag)
+    log_sidecar(sidecar, filename=image_path.name, log_tag=log_tag)
     return sidecar
 
 
-def log_sidecar(sidecar: dict, *, log_tag: str = "stage1") -> None:
+def log_sidecar(sidecar: dict, *, filename: str, log_tag: str = "stage1") -> None:
     """Log every perception slot the model returned at INFO.
 
     Slot names come from the per-game `_perception_schema.md` — we don't have
@@ -228,6 +168,6 @@ def log_sidecar(sidecar: dict, *, log_tag: str = "stage1") -> None:
         logger.info("%s   raw_text: %s", log_tag, preview.replace("\n", " | "))
     logger.info(
         "%s sidecar summary: file=%s slots=%d filled=%d not_visible=%d",
-        log_tag, sidecar.get("screenshot"),
+        log_tag, filename,
         len(slots), filled, not_visible,
     )

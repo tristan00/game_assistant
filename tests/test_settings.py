@@ -5,22 +5,10 @@ import pytest
 from app import settings as settings_module
 from app.settings import (
     DEFAULTS,
-    _coerce,
     load_settings,
     qt_hotkey_to_pynput,
     save_settings,
 )
-
-
-# ---- _coerce ----
-
-
-def test_coerce_int_from_string():
-    assert _coerce("interval_seconds", "42") == 42
-
-
-def test_coerce_str_from_int():
-    assert _coerce("model", 123) == "123"
 
 
 # ---- load_settings / save_settings ----
@@ -39,6 +27,14 @@ def test_save_then_load_roundtrip():
     assert loaded["last_n"] == DEFAULTS["last_n"]
 
 
+def test_save_persists_values_matching_default():
+    """Drop-defaults logic was removed: the file now stores whatever the
+    user saved, even if it equals the current default."""
+    save_settings({"interval_seconds": DEFAULTS["interval_seconds"]})
+    raw = json.loads(settings_module.SETTINGS_PATH.read_text(encoding="utf-8"))
+    assert raw["interval_seconds"] == DEFAULTS["interval_seconds"]
+
+
 def test_save_ignores_unknown_keys():
     save_settings({"interval_seconds": 99, "definitely_not_a_key": "nope"})
     loaded = load_settings()
@@ -46,11 +42,11 @@ def test_save_ignores_unknown_keys():
     assert "definitely_not_a_key" not in loaded
 
 
-def test_load_falls_back_to_defaults_on_corrupt_json():
+def test_load_raises_on_corrupt_json():
     settings_module.SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     settings_module.SETTINGS_PATH.write_text("{not valid json", encoding="utf-8")
-    loaded = load_settings()
-    assert loaded == DEFAULTS
+    with pytest.raises(json.JSONDecodeError):
+        load_settings()
 
 
 def test_load_merges_partial_overrides():
@@ -61,41 +57,6 @@ def test_load_merges_partial_overrides():
     loaded = load_settings()
     assert loaded["interval_seconds"] == 11
     assert loaded["model"] == DEFAULTS["model"]
-
-
-def test_save_coerces_value_types():
-    # interval_seconds is an int default; passing a string should be coerced.
-    save_settings({"interval_seconds": "77"})
-    loaded = load_settings()
-    assert loaded["interval_seconds"] == 77
-    assert isinstance(loaded["interval_seconds"], int)
-
-
-def test_save_drops_values_matching_default():
-    """Values equal to the current default should NOT be persisted — otherwise
-    later default changes would be masked by stale persisted copies.
-    """
-    save_settings({"interval_seconds": DEFAULTS["interval_seconds"], "model": "claude-haiku-4-5"})
-    raw = json.loads(settings_module.SETTINGS_PATH.read_text(encoding="utf-8"))
-    assert "interval_seconds" not in raw
-    assert raw == {"model": "claude-haiku-4-5"}
-
-
-def test_save_cleans_pre_existing_default_values():
-    """If the file already contains stale default values, the next save strips them."""
-    settings_module.SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    settings_module.SETTINGS_PATH.write_text(
-        json.dumps({
-            "last_n": DEFAULTS["last_n"],
-            "interval_seconds": 99,
-            "model": DEFAULTS["model"],
-        }),
-        encoding="utf-8",
-    )
-    # Any save (even an empty one) triggers cleanup.
-    save_settings({})
-    raw = json.loads(settings_module.SETTINGS_PATH.read_text(encoding="utf-8"))
-    assert raw == {"interval_seconds": 99}
 
 
 # ---- qt_hotkey_to_pynput ----

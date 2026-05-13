@@ -80,26 +80,24 @@
       </details>
     </section>
 
-    <!-- Game knowledge sources -->
+    <!-- Game knowledge sources (read-only status) -->
     <section class="settings-section">
       <h3>Game knowledge sources</h3>
-      <p class="muted small">One row per registered game. Edit the wiki URL/API/root page to point at a different wiki — saving triggers a re-crawl. Delete the corpus to wipe local pages and clear the discovered wiki. Re-run discovery to do both, then re-discover.</p>
+      <p class="muted small">Status of each registered game. The build chain (discovery → crawl → quick-ref → perception schema) runs automatically. There are no manual recovery affordances by design.</p>
       <div id="games-list" class="games-list"></div>
     </section>
 
-    <!-- Perception schema -->
+    <!-- Perception schema (read-only view) -->
     <section class="settings-section">
-      <h3>Perception schema</h3>
-      <p class="muted small">The per-game schema that names the slots the per-screenshot perception pass fills. Stored at <code>~/game_assistant/wikis/&lt;game&gt;/_perception_schema.md</code>. Edit and Save to persist; Regenerate to rebuild from the quick-reference.</p>
+      <h3>Perception schema (read-only)</h3>
+      <p class="muted small">The per-game schema that names the slots the per-screenshot perception pass fills. Stored at <code>~/game_assistant/wikis/&lt;game&gt;/_perception_schema.md</code>. Built automatically by the post-crawl chain.</p>
       <div class="row">
         <label>Game:</label>
         <select id="schema-game-select" class="grow"></select>
-        <button id="schema-regenerate-btn">Regenerate</button>
       </div>
-      <textarea id="schema-editor" rows="18" placeholder="Pick a game above to load its schema."></textarea>
+      <textarea id="schema-editor" rows="18" placeholder="Pick a game above to view its schema." readonly></textarea>
       <div class="row" style="margin-top: 6px;">
         <span id="schema-status" class="grow muted small"></span>
-        <button id="schema-save-btn" disabled>Save schema</button>
       </div>
     </section>
   </div>

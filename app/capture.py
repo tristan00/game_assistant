@@ -11,6 +11,15 @@ logger = logging.getLogger(__name__)
 _TITLE_BLOCKLIST = {"Program Manager", "Default IME", "MSCTFIME UI"}
 
 
+def is_window(hwnd: int) -> bool:
+    """True if ``hwnd`` is currently a live OS window handle.
+
+    Games can churn their HWND across scene/fullscreen transitions; callers
+    use this to detect when a previously-valid selection has gone away.
+    """
+    return bool(win32gui.IsWindow(int(hwnd)))
+
+
 def list_windows() -> list[tuple[int, str]]:
     results: list[tuple[int, str]] = []
 

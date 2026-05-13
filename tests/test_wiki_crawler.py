@@ -115,6 +115,52 @@ def test_crawler_marks_zero_page_run_as_failed(monkeypatch):
     assert "0 pages" in (result.get("error") or "")
 
 
+def test_crawler_zero_writes_on_complete_corpus_is_done_not_failed(monkeypatch):
+    """Incremental re-run on a corpus that's already complete should be 'done', not 'failed'.
+
+    Regression: the 0-page-failure check used to fire whenever pages_written
+    was 0, even though pre-existing pages on disk seed the visited set —
+    leaving the BFS with nothing new to fetch is the expected outcome, not a
+    bug.
+    """
+    # Seed pages on disk as if a prior crawl had completed.
+    storage.ensure_wiki_dirs("g")
+    for title in ("Main_Page", "A", "B"):
+        (storage.pages_dir("g") / f"{title}.md").write_text(f"# {title}\n", encoding="utf-8")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        title = req.url.params.get("page")
+        # Root parses; its links are already-visited pages.
+        if title == "Main_Page":
+            return httpx.Response(200, json={
+                "parse": {
+                    "title": "Main_Page", "displaytitle": "Main_Page",
+                    "wikitext": {"*": "Main."},
+                    "links": [
+                        {"ns": 0, "exists": "", "*": "A"},
+                        {"ns": 0, "exists": "", "*": "B"},
+                    ],
+                }
+            })
+        return httpx.Response(200, json={"error": {"info": "should not be requested"}})
+
+    factory, _ = _build_crawler(handler)
+    monkeypatch.setattr(crawler, "MediaWikiClient", factory)
+    c = crawler.Crawler(
+        game_id="g",
+        wiki_url="https://e.com/",
+        api_url="https://e.com/api.php",
+        root_title="Main_Page",
+        user_agent="t",
+        rate_seconds=0.0,
+    )
+    result = c.run()
+    # Main_Page itself is on disk, so it's skipped too (zero writes).
+    assert result["pages_written"] == 0
+    assert result["state"] == "done"
+    assert result.get("error") is None
+
+
 def test_crawler_cancellation(monkeypatch):
     pages = {f"P{i}": {"links": [f"P{i+1}"], "wikitext": f"page {i}"} for i in range(20)}
     pages["Main_Page"] = {"links": ["P0"], "wikitext": "root"}

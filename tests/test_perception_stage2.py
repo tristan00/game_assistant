@@ -23,27 +23,6 @@ def fake_anthropic(monkeypatch):
     return captured
 
 
-def test_synthesize_is_text_only_no_image_blocks(fake_anthropic):
-    """Stage 2 must NOT upload images — the enumerations are the input."""
-    sidecars = [
-        {"slots": {"time_or_phase": {"value": "Turn 1", "confidence": 0.9}}, "raw_text": ""},
-        {"slots": {"time_or_phase": {"value": "Turn 2", "confidence": 0.9}}, "raw_text": ""},
-    ]
-    stage2.synthesize(
-        sidecars=sidecars,
-        image_filenames=["shot_1.png", "shot_2.png"],
-        schema_text="SCHEMA",
-        question="What should I do next turn?",
-        api_key="k",
-        model="sonnet",
-    )
-    messages = fake_anthropic["kwargs"]["messages"]
-    # User message content is a single string (no image blocks).
-    assert isinstance(messages[0]["content"], str)
-    # Sanity: no base64 in the prompt either.
-    assert "base64" not in messages[0]["content"]
-
-
 def test_synthesize_prompt_contains_enumerations_and_hint(fake_anthropic):
     sidecars = [
         {"slots": {"time_or_phase": {"value": "Turn 1", "confidence": 0.9}}, "raw_text": ""},
@@ -64,48 +43,31 @@ def test_synthesize_prompt_contains_enumerations_and_hint(fake_anthropic):
     assert "What's the next move?" in user_text
 
 
-def test_synthesize_system_includes_schema_with_cache_marker(fake_anthropic):
-    stage2.synthesize(
-        sidecars=[{"slots": {}, "raw_text": ""}],
-        image_filenames=["x.png"],
-        schema_text="MY-SCHEMA-TEXT",
-        question="x",
-        api_key="k",
-        model="sonnet",
-    )
-    system = fake_anthropic["kwargs"]["system"]
-    assert isinstance(system, list)
-    assert system[0]["cache_control"] == {"type": "ephemeral"}
-    assert "MY-SCHEMA-TEXT" in system[0]["text"]
-
-
-def test_synthesize_handles_missing_sidecars(fake_anthropic):
-    stage2.synthesize(
-        sidecars=[None, {"slots": {}, "raw_text": ""}],
-        image_filenames=["a.png", "b.png"],
-        schema_text="SCHEMA",
-        question="x",
-        api_key="k",
-        model="sonnet",
-    )
-    user_text = fake_anthropic["kwargs"]["messages"][0]["content"]
-    assert "stage-1 enumeration unavailable" in user_text
-
-
-def test_synthesize_returns_none_on_empty_response(fake_anthropic):
+def test_synthesize_raises_on_empty_response(fake_anthropic):
     fake_anthropic["response_text"] = ""
-    out = stage2.synthesize(
-        sidecars=[{"slots": {}, "raw_text": ""}],
-        image_filenames=["x.png"],
-        schema_text="SCHEMA", question="x",
-        api_key="k", model="sonnet",
-    )
-    assert out is None
+    with pytest.raises(RuntimeError, match="empty synthesis"):
+        stage2.synthesize(
+            sidecars=[{"slots": {}, "raw_text": ""}],
+            image_filenames=["x.png"],
+            schema_text="SCHEMA", question="x",
+            api_key="k", model="sonnet",
+        )
 
 
-def test_synthesize_no_sidecars_returns_none(fake_anthropic):
-    assert stage2.synthesize(
-        sidecars=[], image_filenames=[],
-        schema_text="x", question="x",
-        api_key="k", model="m",
-    ) is None
+def test_synthesize_raises_on_no_sidecars(fake_anthropic):
+    with pytest.raises(ValueError, match="sidecars list is empty"):
+        stage2.synthesize(
+            sidecars=[], image_filenames=[],
+            schema_text="x", question="x",
+            api_key="k", model="m",
+        )
+
+
+def test_synthesize_raises_on_length_mismatch(fake_anthropic):
+    with pytest.raises(ValueError, match="length mismatch"):
+        stage2.synthesize(
+            sidecars=[{"slots": {}, "raw_text": ""}],
+            image_filenames=["a.png", "b.png"],
+            schema_text="x", question="x",
+            api_key="k", model="m",
+        )

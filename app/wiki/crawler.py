@@ -73,6 +73,7 @@ class Crawler:
         # Seed visited from any existing pages so re-runs don't duplicate work.
         for p in pages_dir(self.game_id).glob("*.md"):
             self.visited.add(p.stem)
+        prior_pages_on_disk = len(self.visited)
         self._save_state(state="running")
         self._emit({"type": "crawl_started", "game_id": self.game_id, "root_title": self.root_title})
         started = time.monotonic()
@@ -131,7 +132,11 @@ class Crawler:
             logger.exception("crawl %s raised: %r", self.game_id, exc)
             last_error = repr(exc)
         elapsed = time.monotonic() - started
-        if last_error is None and self.pages_written == 0:
+        # Only flag a 0-page run as failed when no prior corpus existed on
+        # disk. If pre-existing pages seeded visited, a zero-write run just
+        # means the BFS frontier was exhausted (incremental re-run on a
+        # complete corpus) — that's "done", not "failed".
+        if last_error is None and self.pages_written == 0 and prior_pages_on_disk == 0:
             last_error = (
                 f"crawl wrote 0 pages — root_title={self.root_title!r} did not parse on the wiki. "
                 "Discovery handed us a seed that doesn't exist as an article. Fix discovery to "
