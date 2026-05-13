@@ -1,4 +1,4 @@
-from app.prompts import STRATEGY_INSTRUCTIONS, SYSTEM_PROMPT
+from app.prompts import GOAL_INSTRUCTIONS, SYSTEM_PROMPT
 
 
 def test_system_prompt_is_nonempty_string():
@@ -6,6 +6,6 @@ def test_system_prompt_is_nonempty_string():
     assert SYSTEM_PROMPT.strip() != ""
 
 
-def test_strategy_instructions_is_nonempty_string():
-    assert isinstance(STRATEGY_INSTRUCTIONS, str)
-    assert STRATEGY_INSTRUCTIONS.strip() != ""
+def test_goal_instructions_is_nonempty_string():
+    assert isinstance(GOAL_INSTRUCTIONS, str)
+    assert GOAL_INSTRUCTIONS.strip() != ""

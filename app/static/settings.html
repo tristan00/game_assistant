@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>game_assistant — Settings</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/settings.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="row" style="margin-bottom: 8px;">
+      <a href="/" class="button-link ghost">← Back to main</a>
+      <span class="grow"></span>
+      <h2 style="margin: 0;">Settings</h2>
+    </div>
+
+    <div id="error-banner" class="error-banner hidden"></div>
+
+    <!-- Generic settings -->
+    <section class="settings-section">
+      <h3>General</h3>
+      <div class="form">
+        <label>Reasoning model:</label>
+        <select id="g-model"></select>
+
+        <label>Capture interval (s):</label>
+        <input id="g-interval" type="number" min="5" max="3600" />
+
+        <label>Last N images sent:</label>
+        <input id="g-last-n" type="number" min="1" max="20" />
+
+        <label>Global hotkey:</label>
+        <input id="g-hotkey" type="text" placeholder="Ctrl+Alt+S" />
+
+        <label>Prompt cache:</label>
+        <label class="checkbox-label"><input id="g-prompt-cache" type="checkbox" /> Cache system prompt across requests</label>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <span class="grow muted small">Saves on change.</span>
+      </div>
+    </section>
+
+    <!-- Advanced tuning knobs -->
+    <section class="settings-section">
+      <details>
+        <summary><h3 style="display:inline-block; margin: 0;">Advanced</h3></summary>
+        <p class="muted small">Internal tuning. Defaults are reasonable; change only if you know why.</p>
+        <div class="form">
+          <label>Perception stage-1 model:</label>
+          <input id="g-stage1-model" type="text" />
+
+          <label>Perception stage-2 model:</label>
+          <input id="g-stage2-model" type="text" />
+
+          <label>Game-ID model:</label>
+          <input id="g-gameid-model" type="text" />
+
+          <label>Wiki discovery model:</label>
+          <input id="g-discovery-model" type="text" />
+
+          <label>Quick-ref model:</label>
+          <input id="g-quickref-model" type="text" />
+
+          <label>Schema-builder model:</label>
+          <input id="g-schemabuilder-model" type="text" />
+
+          <label>Wiki user-agent:</label>
+          <input id="g-wiki-ua" type="text" />
+
+          <label>Wiki rate (s/req):</label>
+          <input id="g-wiki-rate" type="number" min="0.1" max="60" step="0.1" />
+
+          <label>Tool-use iterations max:</label>
+          <input id="g-tool-iters" type="number" min="1" max="20" />
+        </div>
+        <div class="row" style="margin-top: 8px;">
+          <span class="grow muted small">Saves on change.</span>
+        </div>
+      </details>
+    </section>
+
+    <!-- Game knowledge sources -->
+    <section class="settings-section">
+      <h3>Game knowledge sources</h3>
+      <p class="muted small">One row per registered game. Edit the wiki URL/API/root page to point at a different wiki — saving triggers a re-crawl. Delete the corpus to wipe local pages and clear the discovered wiki. Re-run discovery to do both, then re-discover.</p>
+      <div id="games-list" class="games-list"></div>
+    </section>
+
+    <!-- Perception schema -->
+    <section class="settings-section">
+      <h3>Perception schema</h3>
+      <p class="muted small">The per-game schema that names the slots the per-screenshot perception pass fills. Stored at <code>~/game_assistant/wikis/&lt;game&gt;/_perception_schema.md</code>. Edit and Save to persist; Regenerate to rebuild from the quick-reference.</p>
+      <div class="row">
+        <label>Game:</label>
+        <select id="schema-game-select" class="grow"></select>
+        <button id="schema-regenerate-btn">Regenerate</button>
+      </div>
+      <textarea id="schema-editor" rows="18" placeholder="Pick a game above to load its schema."></textarea>
+      <div class="row" style="margin-top: 6px;">
+        <span id="schema-status" class="grow muted small"></span>
+        <button id="schema-save-btn" disabled>Save schema</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/settings.js"></script>
+</body>
+</html>

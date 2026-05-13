@@ -5,25 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app import assistant_client
-from app.assistant_client import _web_search_tool, run_completion
-
-
-# ---- _web_search_tool ----
-
-
-def test_web_search_tool_zero_returns_none():
-    assert _web_search_tool(0) is None
-
-
-def test_web_search_tool_negative_returns_none():
-    assert _web_search_tool(-1) is None
-
-
-def test_web_search_tool_positive_returns_dict():
-    tool = _web_search_tool(5)
-    assert tool["name"] == "web_search"
-    assert tool["max_uses"] == 5
-    assert tool["type"].startswith("web_search_")
+from app.assistant_client import run_completion
 
 
 # ---- run_completion ----
@@ -33,22 +15,35 @@ def _text_block(text: str):
     return SimpleNamespace(type="text", text=text)
 
 
-def _make_response(text: str = "ok", *, search_queries: list[str] | None = None):
+def _tool_use_block(*, id: str, name: str, input: dict):
+    return SimpleNamespace(type="tool_use", id=id, name=name, input=input)
+
+
+def _make_response(text: str = "ok", *, tool_uses=None, stop_reason="end_turn"):
     blocks = []
-    for q in search_queries or []:
-        blocks.append(SimpleNamespace(
-            type="server_tool_use",
-            name="web_search",
-            input={"query": q},
-        ))
+    for tu in tool_uses or []:
+        blocks.append(tu)
     blocks.append(_text_block(text))
-    return SimpleNamespace(content=blocks, stop_reason="end_turn", usage=None)
+    return SimpleNamespace(content=blocks, stop_reason=stop_reason, usage=None)
+
+
+def _system_text(system):
+    """Return the system prompt as a single string regardless of list/str shape."""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "".join(b.get("text", "") for b in system if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _noop_handler(query: str, n: int) -> list[dict]:
+    return []
 
 
 @pytest.fixture
 def fake_anthropic(monkeypatch):
     """Replace anthropic.Anthropic with a stub that records messages.create calls."""
-    captured: dict = {}
+    captured: dict = {"call_log": []}
 
     def fake_ctor(api_key, timeout):
         captured["api_key"] = api_key
@@ -56,6 +51,10 @@ def fake_anthropic(monkeypatch):
 
         def create(**kwargs):
             captured["kwargs"] = kwargs
+            captured["call_log"].append(kwargs)
+            responses = captured.get("responses")
+            if responses:
+                return responses.pop(0)
             return captured.get("response") or _make_response("ok")
 
         return SimpleNamespace(messages=SimpleNamespace(create=create))
@@ -75,10 +74,10 @@ def test_returns_concatenated_text_blocks(fake_anthropic, make_png):
         api_key="k",
         model="claude-sonnet-4-6",
         history=[],
-        strategy_text="",
+        goal_text="",
         question="q",
         image_paths=[make_png()],
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
     assert out == "hello world"
 
@@ -91,20 +90,18 @@ def test_history_renders_as_alternating_user_assistant(fake_anthropic, make_png)
             {"question": "q1", "response": "a1"},
             {"question": "q2", "response": "a2"},
         ],
-        strategy_text="",
+        goal_text="",
         question="q3",
         image_paths=[make_png()],
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
     messages = fake_anthropic["kwargs"]["messages"]
-    # 2 history turns x 2 messages each = 4, plus the latest user turn.
     assert len(messages) == 5
     assert messages[0] == {"role": "user", "content": "q1"}
     assert messages[1] == {"role": "assistant", "content": "a1"}
     assert messages[2] == {"role": "user", "content": "q2"}
     assert messages[3] == {"role": "assistant", "content": "a2"}
     assert messages[4]["role"] == "user"
-    # The latest user message is a list of blocks (image + text).
     assert isinstance(messages[4]["content"], list)
     text_blocks = [b for b in messages[4]["content"] if b.get("type") == "text"]
     assert text_blocks == [{"type": "text", "text": "q3"}]
@@ -116,87 +113,73 @@ def test_image_paths_trimmed_to_20(fake_anthropic, make_png):
         api_key="k",
         model="claude-sonnet-4-6",
         history=[],
-        strategy_text="",
+        goal_text="",
         question="q",
         image_paths=paths,
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
     last_user = fake_anthropic["kwargs"]["messages"][-1]
     image_blocks = [b for b in last_user["content"] if b.get("type") == "image"]
     assert len(image_blocks) == 20
 
 
-def test_strategy_text_appended_to_system_prompt(fake_anthropic, make_png):
+def test_goal_text_appended_to_system_prompt(fake_anthropic, make_png):
     run_completion(
         api_key="k",
         model="claude-sonnet-4-6",
         history=[],
-        strategy_text="Skarbrand rush, ignore Cathay until turn 50.",
+        goal_text="Skarbrand rush, ignore Cathay until turn 50.",
         question="q",
         image_paths=[make_png()],
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
-    system = fake_anthropic["kwargs"]["system"]
-    assert "Strategic Context (begin)" in system
+    system = _system_text(fake_anthropic["kwargs"]["system"])
+    assert "Goal (begin)" in system
     assert "Skarbrand rush" in system
-    assert "Strategic Context (end)" in system
+    assert "Goal (end)" in system
 
 
-def test_empty_strategy_text_omits_strategy_block(fake_anthropic, make_png):
+def test_empty_goal_text_omits_goal_block(fake_anthropic, make_png):
     run_completion(
         api_key="k",
         model="claude-sonnet-4-6",
         history=[],
-        strategy_text="",
+        goal_text="",
         question="q",
         image_paths=[make_png()],
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
-    system = fake_anthropic["kwargs"]["system"]
-    assert "Strategic Context" not in system
+    system = _system_text(fake_anthropic["kwargs"]["system"])
+    assert "Goal (begin)" not in system
 
 
-def test_whitespace_only_strategy_text_omits_block(fake_anthropic, make_png):
+def test_whitespace_only_goal_text_omits_block(fake_anthropic, make_png):
     run_completion(
         api_key="k",
         model="claude-sonnet-4-6",
         history=[],
-        strategy_text="   \n  \t ",
+        goal_text="   \n  \t ",
         question="q",
         image_paths=[make_png()],
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
-    system = fake_anthropic["kwargs"]["system"]
-    assert "Strategic Context" not in system
+    system = _system_text(fake_anthropic["kwargs"]["system"])
+    assert "Goal (begin)" not in system
 
 
-def test_web_search_zero_omits_tools_kwarg(fake_anthropic, make_png):
+def test_search_game_rules_is_the_only_tool(fake_anthropic, make_png):
     run_completion(
         api_key="k",
         model="claude-sonnet-4-6",
         history=[],
-        strategy_text="",
+        goal_text="",
         question="q",
         image_paths=[make_png()],
-        web_search_max_uses=0,
-    )
-    assert "tools" not in fake_anthropic["kwargs"]
-
-
-def test_web_search_positive_includes_tools_kwarg(fake_anthropic, make_png):
-    run_completion(
-        api_key="k",
-        model="claude-sonnet-4-6",
-        history=[],
-        strategy_text="",
-        question="q",
-        image_paths=[make_png()],
-        web_search_max_uses=3,
+        search_game_rules_handler=_noop_handler,
     )
     tools = fake_anthropic["kwargs"]["tools"]
-    assert len(tools) == 1
-    assert tools[0]["name"] == "web_search"
-    assert tools[0]["max_uses"] == 3
+    tool_names = [t.get("name") for t in tools]
+    assert tool_names == ["search_game_rules"]
 
 
 def test_api_key_and_model_propagate(fake_anthropic, make_png):
@@ -204,10 +187,179 @@ def test_api_key_and_model_propagate(fake_anthropic, make_png):
         api_key="sk-ant-xyz",
         model="claude-haiku-4-5",
         history=[],
-        strategy_text="",
+        goal_text="",
         question="q",
         image_paths=[make_png()],
-        web_search_max_uses=0,
+        search_game_rules_handler=_noop_handler,
     )
     assert fake_anthropic["api_key"] == "sk-ant-xyz"
     assert fake_anthropic["kwargs"]["model"] == "claude-haiku-4-5"
+
+
+# ---- Quick-ref injection + cache control + corpus note ----
+
+
+def test_quick_ref_is_injected_into_system_prompt(fake_anthropic, make_png):
+    run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=_noop_handler,
+        quick_ref_text="## Total War facts\n- Skaven scurry.\n",
+    )
+    system = _system_text(fake_anthropic["kwargs"]["system"])
+    assert "Active game quick reference" in system
+    assert "Skaven scurry" in system
+
+
+def test_prompt_cache_control_on_system_block_by_default(fake_anthropic, make_png):
+    run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=_noop_handler,
+        quick_ref_text="hi",
+    )
+    system = fake_anthropic["kwargs"]["system"]
+    assert isinstance(system, list)
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_prompt_cache_disabled_yields_plain_string_system(fake_anthropic, make_png):
+    run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=_noop_handler,
+        enable_prompt_cache=False,
+    )
+    assert isinstance(fake_anthropic["kwargs"]["system"], str)
+
+
+def test_corpus_search_note_always_added(fake_anthropic, make_png):
+    run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=_noop_handler,
+    )
+    system = _system_text(fake_anthropic["kwargs"]["system"])
+    assert "search_game_rules" in system
+    assert "corpus" in system.lower()
+
+
+def test_search_game_rules_tool_use_loop_dispatches_and_returns_final_text(fake_anthropic, make_png):
+    handler_calls: list[tuple[str, int]] = []
+
+    def handler(query: str, n: int) -> list[dict]:
+        handler_calls.append((query, n))
+        return [{"title": "Ritual of Rebirth", "url": "https://w/RoR", "snippet": "Requires a magical forest."}]
+
+    fake_anthropic["responses"] = [
+        _make_response(
+            "",
+            tool_uses=[_tool_use_block(id="tu_1", name="search_game_rules", input={"query": "ritual of rebirth", "max_results": 3})],
+            stop_reason="tool_use",
+        ),
+        _make_response("The Ritual of Rebirth requires a magical forest.", stop_reason="end_turn"),
+    ]
+
+    out = run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=handler,
+    )
+    assert "magical forest" in out
+    assert handler_calls == [("ritual of rebirth", 3)]
+    last_messages = fake_anthropic["call_log"][-1]["messages"]
+    roles = [m["role"] for m in last_messages]
+    assert roles[-1] == "user"
+    last_blocks = last_messages[-1]["content"]
+    assert any(b.get("type") == "tool_result" and b.get("tool_use_id") == "tu_1" for b in last_blocks)
+
+
+def test_synthesis_text_only_sends_latest_image(fake_anthropic, make_png):
+    """When synthesis_text is provided, only the latest image goes into the reasoning call."""
+    paths = [make_png(name=f"img_{i}.png") for i in range(5)]
+    run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=paths,
+        search_game_rules_handler=_noop_handler,
+        synthesis_text="## State\nsome synthesis\n",
+    )
+    last_user = fake_anthropic["kwargs"]["messages"][-1]
+    image_blocks = [b for b in last_user["content"] if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    text_blocks = [b for b in last_user["content"] if b.get("type") == "text"]
+    joined = "\n".join(b["text"] for b in text_blocks)
+    assert "PRIMARY STATE" in joined
+    assert "some synthesis" in joined
+    assert joined.endswith("q")
+
+
+def test_synthesis_text_adds_synthesis_note_to_system_prompt(fake_anthropic, make_png):
+    run_completion(
+        api_key="k", model="claude-sonnet-4-6",
+        history=[], goal_text="", question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=_noop_handler,
+        synthesis_text="hi",
+    )
+    system = _system_text(fake_anthropic["kwargs"]["system"])
+    assert "Synthesis primary-state mode" in system
+
+
+def test_empty_synthesis_text_does_not_trigger_single_image_mode(fake_anthropic, make_png):
+    paths = [make_png(name=f"img_{i}.png") for i in range(3)]
+    run_completion(
+        api_key="k", model="claude-sonnet-4-6",
+        history=[], goal_text="", question="q",
+        image_paths=paths,
+        search_game_rules_handler=_noop_handler,
+        synthesis_text="   \n   ",
+    )
+    last_user = fake_anthropic["kwargs"]["messages"][-1]
+    image_blocks = [b for b in last_user["content"] if b.get("type") == "image"]
+    assert len(image_blocks) == 3
+
+
+def test_search_game_rules_tool_use_loop_respects_max_iters(fake_anthropic, make_png):
+    """A model stuck in a tool_use loop should be bounded by client_tool_max_iters."""
+    fake_anthropic["responses"] = [
+        _make_response(
+            "stuck", tool_uses=[_tool_use_block(id=f"tu_{i}", name="search_game_rules", input={"query": "x"})],
+            stop_reason="tool_use",
+        )
+        for i in range(10)
+    ]
+    out = run_completion(
+        api_key="k",
+        model="claude-sonnet-4-6",
+        history=[],
+        goal_text="",
+        question="q",
+        image_paths=[make_png()],
+        search_game_rules_handler=lambda q, n: [],
+        client_tool_max_iters=2,
+    )
+    assert len(fake_anthropic["call_log"]) == 2

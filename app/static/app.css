@@ -84,7 +84,7 @@ button.ghost:hover { background: var(--panel); }
   margin-top: 6px;
 }
 
-#strategy-editor { font-family: "Cascadia Mono", Consolas, monospace; }
+#goal-editor { font-family: "Cascadia Mono", Consolas, monospace; }
 
 .submit-row { margin-top: 4px; }
 

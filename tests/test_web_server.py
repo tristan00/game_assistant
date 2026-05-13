@@ -57,7 +57,7 @@ def test_get_state_returns_snapshot_shape(client):
     body = resp.json()
     for key in (
         "settings", "session", "selected_hwnd", "windows",
-        "history", "strategies", "active_strategy", "in_flight", "has_api_key",
+        "history", "goals", "active_goal", "in_flight", "has_api_key",
     ):
         assert key in body
     assert body["selected_hwnd"] is None
@@ -107,52 +107,52 @@ def test_put_settings_round_trips(client):
     assert client.get("/api/settings").json()["interval_seconds"] == 30
 
 
-# ---- strategies ----
+# ---- goals ----
 
 
-def test_strategies_list_empty_initially(client):
-    body = client.get("/api/strategies").json()
-    assert body == {"strategies": [], "active": ""}
+def test_goals_list_empty_initially(client):
+    body = client.get("/api/goals").json()
+    assert body == {"goals": [], "active": ""}
 
 
-def test_create_then_list_then_delete_strategy(client):
-    resp = client.post("/api/strategies", json={"name": "My Plan"})
+def test_create_then_list_then_delete_goal(client):
+    resp = client.post("/api/goals", json={"name": "My Plan"})
     assert resp.status_code == 200
     assert resp.json() == {"name": "My Plan"}
 
-    listed = client.get("/api/strategies").json()
-    assert "My Plan" in listed["strategies"]
+    listed = client.get("/api/goals").json()
+    assert "My Plan" in listed["goals"]
 
-    saved = client.put("/api/strategies/My Plan", json={"content": "hello"})
+    saved = client.put("/api/goals/My Plan", json={"content": "hello"})
     assert saved.json()["content"] == "hello"
 
-    loaded = client.get("/api/strategies/My Plan").json()
+    loaded = client.get("/api/goals/My Plan").json()
     assert loaded == {"name": "My Plan", "content": "hello"}
 
-    deleted = client.delete("/api/strategies/My Plan")
+    deleted = client.delete("/api/goals/My Plan")
     assert deleted.json() == {"ok": True}
-    assert "My Plan" not in client.get("/api/strategies").json()["strategies"]
+    assert "My Plan" not in client.get("/api/goals").json()["goals"]
 
 
-def test_create_strategy_rejects_empty_name(client):
-    assert client.post("/api/strategies", json={"name": ""}).status_code == 400
+def test_create_goal_rejects_empty_name(client):
+    assert client.post("/api/goals", json={"name": ""}).status_code == 400
 
 
-def test_create_strategy_rejects_duplicate(client):
-    client.post("/api/strategies", json={"name": "dup"})
-    assert client.post("/api/strategies", json={"name": "dup"}).status_code == 409
+def test_create_goal_rejects_duplicate(client):
+    client.post("/api/goals", json={"name": "dup"})
+    assert client.post("/api/goals", json={"name": "dup"}).status_code == 409
 
 
-def test_active_strategy_404_for_unknown(client):
-    assert client.put("/api/active_strategy", json={"name": "ghost"}).status_code == 404
+def test_active_goal_404_for_unknown(client):
+    assert client.put("/api/active_goal", json={"name": "ghost"}).status_code == 404
 
 
-def test_active_strategy_clears_when_set_to_empty(client):
-    client.post("/api/strategies", json={"name": "real"})
-    client.put("/api/active_strategy", json={"name": "real"})
-    assert client.get("/api/state").json()["active_strategy"] == "real"
-    client.put("/api/active_strategy", json={"name": ""})
-    assert client.get("/api/state").json()["active_strategy"] == ""
+def test_active_goal_clears_when_set_to_empty(client):
+    client.post("/api/goals", json={"name": "real"})
+    client.put("/api/active_goal", json={"name": "real"})
+    assert client.get("/api/state").json()["active_goal"] == "real"
+    client.put("/api/active_goal", json={"name": ""})
+    assert client.get("/api/state").json()["active_goal"] == ""
 
 
 # ---- session ----

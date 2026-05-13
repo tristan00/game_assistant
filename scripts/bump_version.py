@@ -7,7 +7,6 @@ Updates ``__version__`` in ``app/__init__.py`` and prints the new version to
 stdout. Pure stdlib; no external deps. Used by the CI release job and exercised
 by ``tests/test_bump_version.py``.
 """
-from __future__ import annotations
 
 import argparse
 import pathlib

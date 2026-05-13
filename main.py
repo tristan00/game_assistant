@@ -135,6 +135,11 @@ def main() -> int:
     args, _ = parser.parse_known_args()
 
     logger.info("starting app web=%s host=%s port=%d", args.web, args.host, args.port)
+
+    # One-shot disk migrations under ~/game_assistant/. Idempotent.
+    from app.migrations import run_startup_migrations
+    run_startup_migrations()
+
     if args.web:
         return _run_web(host=args.host, port=args.port, open_browser=not args.no_browser)
     return _run_native_shell()

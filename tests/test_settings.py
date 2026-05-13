@@ -71,6 +71,33 @@ def test_save_coerces_value_types():
     assert isinstance(loaded["interval_seconds"], int)
 
 
+def test_save_drops_values_matching_default():
+    """Values equal to the current default should NOT be persisted — otherwise
+    later default changes would be masked by stale persisted copies.
+    """
+    save_settings({"interval_seconds": DEFAULTS["interval_seconds"], "model": "claude-haiku-4-5"})
+    raw = json.loads(settings_module.SETTINGS_PATH.read_text(encoding="utf-8"))
+    assert "interval_seconds" not in raw
+    assert raw == {"model": "claude-haiku-4-5"}
+
+
+def test_save_cleans_pre_existing_default_values():
+    """If the file already contains stale default values, the next save strips them."""
+    settings_module.SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    settings_module.SETTINGS_PATH.write_text(
+        json.dumps({
+            "last_n": DEFAULTS["last_n"],
+            "interval_seconds": 99,
+            "model": DEFAULTS["model"],
+        }),
+        encoding="utf-8",
+    )
+    # Any save (even an empty one) triggers cleanup.
+    save_settings({})
+    raw = json.loads(settings_module.SETTINGS_PATH.read_text(encoding="utf-8"))
+    assert raw == {"interval_seconds": 99}
+
+
 # ---- qt_hotkey_to_pynput ----
 
 

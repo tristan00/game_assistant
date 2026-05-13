@@ -16,34 +16,26 @@ const els = {
   windowSelect: $("window-select"),
   refreshBtn: $("refresh-btn"),
   captureBtn: $("capture-btn"),
+  gameStatus: $("game-status"),
+  reidentifyBtn: $("reidentify-btn"),
   sessionLabel: $("session-label"),
   intervalInput: $("interval-input"),
   newSessionBtn: $("new-session-btn"),
   modelSelect: $("model-select"),
   lastNInput: $("last-n-input"),
-  webSearchInput: $("web-search-input"),
-  settingsBtn: $("settings-btn"),
   apiKeyBtn: $("api-key-btn"),
-  strategySelect: $("strategy-select"),
-  newStrategyBtn: $("new-strategy-btn"),
-  editStrategyBtn: $("edit-strategy-btn"),
-  saveStrategyBtn: $("save-strategy-btn"),
-  deleteStrategyBtn: $("delete-strategy-btn"),
-  strategyEditor: $("strategy-editor"),
+  goalSelect: $("goal-select"),
+  newGoalBtn: $("new-goal-btn"),
+  editGoalBtn: $("edit-goal-btn"),
+  saveGoalBtn: $("save-goal-btn"),
+  deleteGoalBtn: $("delete-goal-btn"),
+  goalEditor: $("goal-editor"),
   question: $("question"),
   submitBtn: $("submit-btn"),
   pending: $("pending"),
   chat: $("chat"),
   status: $("status"),
   hotkeyHint: $("hotkey-hint"),
-  settingsModal: $("settings-modal"),
-  settingsModel: $("settings-model"),
-  settingsInterval: $("settings-interval"),
-  settingsLastN: $("settings-last-n"),
-  settingsWebSearch: $("settings-web-search"),
-  settingsHotkey: $("settings-hotkey"),
-  settingsCancel: $("settings-cancel"),
-  settingsSave: $("settings-save"),
   apiKeyModal: $("api-key-modal"),
   apiKeyInput: $("api-key-input"),
   apiKeyCancel: $("api-key-cancel"),
@@ -57,15 +49,32 @@ let state = {
   settings: null,
   selectedHwnd: null,
   history: [],
-  strategies: [],
-  activeStrategy: "",
-  activeStrategyContent: "",
-  strategyEditing: false,
+  goals: [],
+  activeGoal: "",
+  activeGoalContent: "",
+  goalEditing: false,
   inFlight: false,
   inFlightStartedAt: null,
   inFlightExcerpt: "",
   inFlightModel: "",
   inFlightNImages: 0,
+  // Game identity
+  activeGameId: null,
+  activeGameName: null,
+  activeGameIsNotAGame: false,
+  activeGameCrawlState: "none",
+  activeGamePageCount: 0,
+  activeGameWikiUrl: null,
+  identifyingStage: null,
+  wikiStage: null,
+  crawlProgress: null,
+  // Ingredient state — what context the next submit will/won't have.
+  hasApiKey: false,
+  hasQuickRef: false,
+  hasPerceptionSchema: false,
+  quickRefBuilding: false,
+  schemaBuilding: false,
+  windowUnreachable: false,
 };
 
 let pendingTickHandle = null;
@@ -129,7 +138,6 @@ function appendError(errorText, elapsedStr) {
 function renderHistory() {
   els.chat.innerHTML = "";
   for (const turn of state.history) {
-    // Re-rendering history doesn't preserve original elapsed times; show — instead.
     appendTurn(turn.question, turn.response, "—");
   }
 }
@@ -153,33 +161,36 @@ function renderWindows(windows) {
   }
 }
 
-function renderStrategies() {
-  els.strategySelect.innerHTML = "";
+function renderGoals() {
+  els.goalSelect.innerHTML = "";
   const noneOpt = document.createElement("option");
   noneOpt.value = "";
   noneOpt.textContent = "(none)";
-  els.strategySelect.appendChild(noneOpt);
-  for (const name of state.strategies) {
+  els.goalSelect.appendChild(noneOpt);
+  for (const name of state.goals) {
     const opt = document.createElement("option");
     opt.value = name;
     opt.textContent = name;
-    els.strategySelect.appendChild(opt);
+    els.goalSelect.appendChild(opt);
   }
-  els.strategySelect.value = state.activeStrategy || "";
-  els.strategyEditor.value = state.activeStrategyContent || "";
-  els.strategyEditor.readOnly = true;
-  els.editStrategyBtn.disabled = !state.activeStrategy;
-  els.saveStrategyBtn.disabled = true;
-  els.deleteStrategyBtn.disabled = !state.activeStrategy;
-  state.strategyEditing = false;
+  els.goalSelect.value = state.activeGoal || "";
+  els.goalEditor.value = state.activeGoalContent || "";
+  els.goalEditor.readOnly = true;
+  if (state.activeGoal) {
+    els.goalEditor.classList.remove("hidden");
+  } else {
+    els.goalEditor.classList.add("hidden");
+  }
+  els.editGoalBtn.disabled = !state.activeGoal;
+  els.saveGoalBtn.disabled = true;
+  els.deleteGoalBtn.disabled = !state.activeGoal;
+  state.goalEditing = false;
 }
 
 function applySettings(s) {
   state.settings = s;
   els.intervalInput.value = s.interval_seconds;
   els.lastNInput.value = s.last_n;
-  els.webSearchInput.value = s.web_search_max_uses;
-  // Populate model select if empty.
   if (els.modelSelect.options.length === 0) {
     for (const m of MODELS) {
       const opt = document.createElement("option");
@@ -193,6 +204,90 @@ function applySettings(s) {
 
 function renderSession(folder, total) {
   els.sessionLabel.textContent = `Active session: ${folder} — ${total} shots`;
+}
+
+function renderGameStatus() {
+  const parts = [];
+  if (!state.hasApiKey) parts.push("⚠ No API key (click 'API key…')");
+  if (state.windowUnreachable) parts.push("⚠ window unreachable");
+
+  if (state.selectedHwnd === null) {
+    parts.unshift("Game: — (pick a window)");
+    els.gameStatus.textContent = parts.join(" · ");
+    els.reidentifyBtn.disabled = true;
+    return;
+  }
+  if (state.activeGameId === null) {
+    let msg = "Game: identifying…";
+    if (state.identifyingStage === "deferred_no_api_key") msg = "Game: identification waiting for API key";
+    else if (state.identifyingStage === "no_screenshot") msg = "Game: identification needs a screenshot";
+    else if (state.identifyingStage === "llm_failed") msg = "Game: identification failed (see logs)";
+    else if (state.identifyingStage === "low_confidence") msg = "Game: identification inconclusive (low confidence)";
+    parts.unshift(msg);
+    els.gameStatus.textContent = parts.join(" · ");
+    els.reidentifyBtn.disabled = false;
+    return;
+  }
+  if (state.activeGameIsNotAGame) {
+    parts.unshift("Not a game (no wiki context)");
+    els.gameStatus.textContent = parts.join(" · ");
+    els.reidentifyBtn.disabled = false;
+    return;
+  }
+  const gameParts = [`Game: ${state.activeGameName || state.activeGameId}`];
+  if (state.wikiStage === "not_found") {
+    gameParts.push("⚠ no wiki — add URL in Settings");
+  } else if (state.activeGameCrawlState === "running" && state.crawlProgress) {
+    gameParts.push(`crawling (${state.crawlProgress.pages_written} pages)`);
+  } else if (state.activeGameCrawlState === "running") {
+    gameParts.push("crawling…");
+  } else if (state.wikiStage === "discovering") {
+    gameParts.push("discovering wiki…");
+  } else if (state.activeGamePageCount > 0) {
+    gameParts.push(`${state.activeGamePageCount} pages`);
+  }
+  // Ingredient state for the next submit.
+  if (state.quickRefBuilding) gameParts.push("building quick-ref…");
+  else if (!state.hasQuickRef && state.activeGamePageCount > 0) gameParts.push("⚠ no quick-ref");
+  if (state.schemaBuilding) gameParts.push("building schema…");
+  else if (!state.hasPerceptionSchema && state.hasQuickRef) gameParts.push("⚠ no schema");
+  parts.unshift(gameParts.join(" — "));
+  els.gameStatus.textContent = parts.join(" · ");
+  els.reidentifyBtn.disabled = false;
+}
+
+function applyActiveGame(ev) {
+  state.activeGameId = ev.game_id;
+  state.activeGameName = ev.display_name;
+  state.activeGameIsNotAGame = !!ev.is_not_a_game;
+  state.activeGameCrawlState = ev.crawl_state || "none";
+  state.activeGamePageCount = ev.page_count || 0;
+  state.activeGameWikiUrl = ev.wiki_url || null;
+  state.identifyingStage = null;
+  state.crawlProgress = null;
+  // Game changed — reset per-game ingredient state until the snapshot or
+  // subsequent events tell us what's actually on disk.
+  state.hasQuickRef = false;
+  state.hasPerceptionSchema = false;
+  state.quickRefBuilding = false;
+  state.schemaBuilding = false;
+  if (state.activeGameWikiUrl) {
+    state.wikiStage = null;
+  }
+  renderGameStatus();
+}
+
+async function reidentifyGame() {
+  if (state.selectedHwnd === null) return;
+  state.activeGameId = null;
+  state.identifyingStage = "started";
+  state.crawlProgress = null;
+  renderGameStatus();
+  try {
+    await api("POST", "/api/games/reidentify", {});
+  } catch (e) {
+    setStatus(`Re-identify failed: ${e.message}`);
+  }
 }
 
 function startPendingTicker() {
@@ -233,6 +328,15 @@ async function selectWindow() {
   const v = els.windowSelect.value;
   const hwnd = v === "" ? null : parseInt(v, 10);
   state.selectedHwnd = hwnd;
+  state.activeGameId = null;
+  state.activeGameName = null;
+  state.activeGameIsNotAGame = false;
+  state.activeGameCrawlState = "none";
+  state.activeGamePageCount = 0;
+  state.activeGameWikiUrl = null;
+  state.identifyingStage = hwnd === null ? null : "started";
+  state.crawlProgress = null;
+  renderGameStatus();
   await api("PUT", "/api/window", { hwnd });
 }
 
@@ -254,35 +358,34 @@ async function saveSetting(key, value) {
   await api("PUT", "/api/settings", { [key]: value });
 }
 
-async function selectStrategy() {
-  const name = els.strategySelect.value;
-  if (state.strategyEditing) {
-    if (!confirm("Discard unsaved changes to the current strategy?")) {
-      els.strategySelect.value = state.activeStrategy || "";
+async function selectGoal() {
+  const name = els.goalSelect.value;
+  if (state.goalEditing) {
+    if (!confirm("Discard unsaved changes to the current goal?")) {
+      els.goalSelect.value = state.activeGoal || "";
       return;
     }
   }
-  await api("PUT", "/api/active_strategy", { name });
-  // Server returns updated content via settings_changed + we fetch via /api/state too.
+  await api("PUT", "/api/active_goal", { name });
   const fresh = await api("GET", "/api/state");
-  state.activeStrategy = fresh.active_strategy;
-  state.activeStrategyContent = fresh.active_strategy_content;
-  renderStrategies();
+  state.activeGoal = fresh.active_goal;
+  state.activeGoalContent = fresh.active_goal_content;
+  renderGoals();
 }
 
-async function newStrategy() {
-  const name = prompt("Strategy name (letters, digits, dashes, underscores, spaces):");
+async function newGoal() {
+  const name = prompt("Goal name (letters, digits, dashes, underscores, spaces):");
   if (!name || !name.trim()) return;
   try {
-    const res = await api("POST", "/api/strategies", { name: name.trim() });
-    await api("PUT", "/api/active_strategy", { name: res.name });
+    const res = await api("POST", "/api/goals", { name: name.trim() });
+    await api("PUT", "/api/active_goal", { name: res.name });
     const fresh = await api("GET", "/api/state");
     Object.assign(state, {
-      strategies: fresh.strategies,
-      activeStrategy: fresh.active_strategy,
-      activeStrategyContent: fresh.active_strategy_content,
+      goals: fresh.goals,
+      activeGoal: fresh.active_goal,
+      activeGoalContent: fresh.active_goal_content,
     });
-    renderStrategies();
+    renderGoals();
     enterEditMode();
   } catch (e) {
     alert(`Create failed: ${e.message}`);
@@ -290,45 +393,46 @@ async function newStrategy() {
 }
 
 function enterEditMode() {
-  if (!state.activeStrategy) return;
-  state.strategyEditing = true;
-  els.strategyEditor.readOnly = false;
-  els.editStrategyBtn.disabled = true;
-  els.saveStrategyBtn.disabled = false;
-  els.deleteStrategyBtn.disabled = true;
-  els.newStrategyBtn.disabled = true;
-  els.strategySelect.disabled = true;
-  els.strategyEditor.focus();
+  if (!state.activeGoal) return;
+  state.goalEditing = true;
+  els.goalEditor.classList.remove("hidden");
+  els.goalEditor.readOnly = false;
+  els.editGoalBtn.disabled = true;
+  els.saveGoalBtn.disabled = false;
+  els.deleteGoalBtn.disabled = true;
+  els.newGoalBtn.disabled = true;
+  els.goalSelect.disabled = true;
+  els.goalEditor.focus();
 }
 
-async function saveStrategy() {
-  if (!state.activeStrategy) return;
-  const content = els.strategyEditor.value;
+async function saveGoal() {
+  if (!state.activeGoal) return;
+  const content = els.goalEditor.value;
   try {
-    await api("PUT", `/api/strategies/${encodeURIComponent(state.activeStrategy)}`, { content });
-    state.activeStrategyContent = content;
-    state.strategyEditing = false;
-    els.strategyEditor.readOnly = true;
-    els.editStrategyBtn.disabled = false;
-    els.saveStrategyBtn.disabled = true;
-    els.deleteStrategyBtn.disabled = false;
-    els.newStrategyBtn.disabled = false;
-    els.strategySelect.disabled = false;
-    setStatus(`Saved strategy '${state.activeStrategy}' (${content.length} chars).`);
+    await api("PUT", `/api/goals/${encodeURIComponent(state.activeGoal)}`, { content });
+    state.activeGoalContent = content;
+    state.goalEditing = false;
+    els.goalEditor.readOnly = true;
+    els.editGoalBtn.disabled = false;
+    els.saveGoalBtn.disabled = true;
+    els.deleteGoalBtn.disabled = false;
+    els.newGoalBtn.disabled = false;
+    els.goalSelect.disabled = false;
+    setStatus(`Saved goal '${state.activeGoal}' (${content.length} chars).`);
   } catch (e) {
     alert(`Save failed: ${e.message}`);
   }
 }
 
-async function deleteStrategy() {
-  if (!state.activeStrategy) return;
-  if (!confirm(`Delete strategy '${state.activeStrategy}'? The .md file will be removed from disk.`)) return;
-  await api("DELETE", `/api/strategies/${encodeURIComponent(state.activeStrategy)}`);
-  state.activeStrategy = "";
-  state.activeStrategyContent = "";
+async function deleteGoal() {
+  if (!state.activeGoal) return;
+  if (!confirm(`Delete goal '${state.activeGoal}'? The .md file will be removed from disk.`)) return;
+  await api("DELETE", `/api/goals/${encodeURIComponent(state.activeGoal)}`);
+  state.activeGoal = "";
+  state.activeGoalContent = "";
   const fresh = await api("GET", "/api/state");
-  state.strategies = fresh.strategies;
-  renderStrategies();
+  state.goals = fresh.goals;
+  renderGoals();
 }
 
 async function submitQuestion() {
@@ -354,36 +458,6 @@ async function submitQuestion() {
   }
 }
 
-// ----- Settings modal -------------------------------------------------------
-
-function openSettingsModal() {
-  if (els.settingsModel.options.length === 0) {
-    for (const m of MODELS) {
-      const opt = document.createElement("option");
-      opt.value = m; opt.textContent = m;
-      els.settingsModel.appendChild(opt);
-    }
-  }
-  els.settingsModel.value = state.settings.model;
-  els.settingsInterval.value = state.settings.interval_seconds;
-  els.settingsLastN.value = state.settings.last_n;
-  els.settingsWebSearch.value = state.settings.web_search_max_uses;
-  els.settingsHotkey.value = state.settings.hotkey_qt;
-  els.settingsModal.classList.remove("hidden");
-}
-
-async function saveSettingsModal() {
-  const updates = {
-    model: els.settingsModel.value,
-    interval_seconds: parseInt(els.settingsInterval.value, 10),
-    last_n: parseInt(els.settingsLastN.value, 10),
-    web_search_max_uses: parseInt(els.settingsWebSearch.value, 10),
-    hotkey_qt: els.settingsHotkey.value.trim() || "Ctrl+Alt+S",
-  };
-  await api("PUT", "/api/settings", updates);
-  els.settingsModal.classList.add("hidden");
-}
-
 // ----- API key modal --------------------------------------------------------
 
 function openApiKeyModal(firstRun = false) {
@@ -402,6 +476,8 @@ async function saveApiKeyModal() {
   try {
     await api("PUT", "/api/api_key", { key });
     els.apiKeyModal.classList.add("hidden");
+    state.hasApiKey = true;
+    renderGameStatus();
     setStatus("API key saved.");
   } catch (e) {
     alert(`Save failed: ${e.message}`);
@@ -446,10 +522,32 @@ function handleWsEvent(msg) {
       }
       state.history = s.history;
       renderHistory();
-      state.strategies = s.strategies;
-      state.activeStrategy = s.active_strategy;
-      state.activeStrategyContent = s.active_strategy_content;
-      renderStrategies();
+      state.goals = s.goals;
+      state.activeGoal = s.active_goal;
+      state.activeGoalContent = s.active_goal_content;
+      renderGoals();
+      state.activeGameId = s.active_game_id;
+      state.activeGameIsNotAGame = !!s.active_game_is_not_a_game;
+      state.hasApiKey = !!s.has_api_key;
+      if (s.active_game) {
+        state.activeGameName = s.active_game.display_name;
+        state.activeGameCrawlState = s.active_game.crawl_state || "none";
+        state.activeGamePageCount = s.active_game.pages_on_disk ?? s.active_game.page_count ?? 0;
+        state.activeGameWikiUrl = s.active_game.wiki_url || null;
+        state.hasQuickRef = !!s.active_game.has_quick_ref;
+        state.hasPerceptionSchema = !!s.active_game.has_perception_schema;
+      } else {
+        state.activeGameName = null;
+        state.activeGameCrawlState = "none";
+        state.activeGamePageCount = 0;
+        state.activeGameWikiUrl = null;
+        state.hasQuickRef = false;
+        state.hasPerceptionSchema = false;
+      }
+      state.quickRefBuilding = false;
+      state.schemaBuilding = false;
+      state.windowUnreachable = false;
+      renderGameStatus();
       if (s.in_flight) {
         state.inFlight = true;
         state.inFlightStartedAt = Date.parse(s.in_flight_started_iso);
@@ -466,9 +564,17 @@ function handleWsEvent(msg) {
     case "capture_saved":
       renderSession(msg.session_folder, msg.total_shots);
       setStatus(`${msg.source}: saved ${msg.filename} (${msg.bytes.toLocaleString()} bytes)`);
+      if (state.windowUnreachable) {
+        state.windowUnreachable = false;
+        renderGameStatus();
+      }
       break;
     case "capture_error":
-      setStatus(`Capture failed (${msg.source}). See server log.`);
+      // Silent retry: surface as a passive status indicator that auto-clears
+      // on the next successful capture. Don't kill the timer or push a modal.
+      state.windowUnreachable = true;
+      renderGameStatus();
+      setStatus(`Capture failed (${msg.source}) — will retry on next tick.`);
       break;
     case "session_changed":
       renderSession(msg.folder_name, msg.total_shots);
@@ -480,9 +586,86 @@ function handleWsEvent(msg) {
     case "settings_changed":
       applySettings(msg.settings);
       break;
-    case "strategy_list_changed":
-      state.strategies = msg.strategies;
-      renderStrategies();
+    case "goal_list_changed":
+      state.goals = msg.goals;
+      renderGoals();
+      break;
+    case "active_game_changed":
+      applyActiveGame(msg);
+      break;
+    case "game_identifying":
+      state.identifyingStage = msg.stage;
+      renderGameStatus();
+      break;
+    case "wiki_discovering":
+      state.wikiStage = "discovering";
+      renderGameStatus();
+      break;
+    case "wiki_discovered":
+      state.wikiStage = null;
+      setStatus(`Wiki discovered for ${state.activeGameName}: ${msg.wiki_url}`);
+      break;
+    case "wiki_not_found":
+      state.wikiStage = "not_found";
+      state.activeGameCrawlState = "none";
+      renderGameStatus();
+      setStatus(`No wiki found for ${msg.display_name}. Fix in Settings → Game knowledge sources.`);
+      break;
+    case "crawl_started":
+      state.activeGameCrawlState = "running";
+      state.crawlProgress = { pages_written: 0, frontier_size: 0, current_title: msg.root_title || "" };
+      renderGameStatus();
+      break;
+    case "crawl_progress":
+      state.activeGameCrawlState = "running";
+      state.crawlProgress = {
+        pages_written: msg.pages_written,
+        frontier_size: msg.frontier_size,
+        current_title: msg.current_title,
+      };
+      renderGameStatus();
+      break;
+    case "crawl_done":
+      state.activeGameCrawlState = "done";
+      state.activeGamePageCount = msg.pages_written;
+      state.crawlProgress = null;
+      renderGameStatus();
+      setStatus(`Wiki crawl done: ${msg.pages_written} pages in ${msg.elapsed_seconds ? msg.elapsed_seconds.toFixed(1) : '?'}s.`);
+      break;
+    case "crawl_error":
+      state.activeGameCrawlState = "failed";
+      state.crawlProgress = null;
+      renderGameStatus();
+      setStatus(`Wiki crawl failed: ${msg.error || 'see logs'}.`);
+      break;
+    case "corpus_ready":
+      setStatus(`Corpus ready for ${state.activeGameName || msg.game_id}: ${msg.page_count} pages indexed.`);
+      break;
+    case "quick_ref_building":
+      if (msg.game_id === state.activeGameId) {
+        state.quickRefBuilding = true;
+        renderGameStatus();
+      }
+      break;
+    case "quick_ref_done":
+      if (msg.game_id === state.activeGameId) {
+        state.quickRefBuilding = false;
+        state.hasQuickRef = true;
+        renderGameStatus();
+      }
+      break;
+    case "schema_building":
+      if (msg.game_id === state.activeGameId) {
+        state.schemaBuilding = true;
+        renderGameStatus();
+      }
+      break;
+    case "schema_done":
+      if (msg.game_id === state.activeGameId) {
+        state.schemaBuilding = false;
+        state.hasPerceptionSchema = true;
+        renderGameStatus();
+      }
       break;
     case "submit_started":
       state.inFlight = true;
@@ -525,20 +708,19 @@ function wire() {
   els.refreshBtn.addEventListener("click", refreshWindows);
   els.captureBtn.addEventListener("click", captureNow);
   els.windowSelect.addEventListener("change", selectWindow);
+  els.reidentifyBtn.addEventListener("click", reidentifyGame);
   els.newSessionBtn.addEventListener("click", newSession);
 
   els.intervalInput.addEventListener("change", () => saveSetting("interval_seconds", parseInt(els.intervalInput.value, 10)));
   els.modelSelect.addEventListener("change", () => saveSetting("model", els.modelSelect.value));
   els.lastNInput.addEventListener("change", () => saveSetting("last_n", parseInt(els.lastNInput.value, 10)));
-  els.webSearchInput.addEventListener("change", () => saveSetting("web_search_max_uses", parseInt(els.webSearchInput.value, 10)));
 
-  els.strategySelect.addEventListener("change", selectStrategy);
-  els.newStrategyBtn.addEventListener("click", newStrategy);
-  els.editStrategyBtn.addEventListener("click", enterEditMode);
-  els.saveStrategyBtn.addEventListener("click", saveStrategy);
-  els.deleteStrategyBtn.addEventListener("click", deleteStrategy);
+  els.goalSelect.addEventListener("change", selectGoal);
+  els.newGoalBtn.addEventListener("click", newGoal);
+  els.editGoalBtn.addEventListener("click", enterEditMode);
+  els.saveGoalBtn.addEventListener("click", saveGoal);
+  els.deleteGoalBtn.addEventListener("click", deleteGoal);
 
-  // Enter submits; Shift+Enter inserts newline.
   els.question.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
@@ -546,10 +728,6 @@ function wire() {
     }
   });
   els.submitBtn.addEventListener("click", submitQuestion);
-
-  els.settingsBtn.addEventListener("click", openSettingsModal);
-  els.settingsCancel.addEventListener("click", () => els.settingsModal.classList.add("hidden"));
-  els.settingsSave.addEventListener("click", saveSettingsModal);
 
   els.apiKeyBtn.addEventListener("click", () => openApiKeyModal(false));
   els.apiKeyCancel.addEventListener("click", () => els.apiKeyModal.classList.add("hidden"));
