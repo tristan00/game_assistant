@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 MAX_TOKENS = 2048
 REQUEST_TIMEOUT_SECONDS = 180.0
-MAX_IMAGES_PER_REQUEST = 20  # Anthropic vision API limit
 
 
 def _block_to_dict(block) -> dict:
@@ -36,9 +35,9 @@ def run_completion(
     history: list[dict[str, str]],
     goal_text: str,
     question: str,
-    image_paths: list[Path],
-    quick_ref_text: str | None = None,
-    synthesis_text: str | None = None,
+    image_path: Path,
+    quick_ref_text: str,
+    synthesis_text: str,
     search_game_rules_handler: Callable[[str, int], list[dict]],
     enable_prompt_cache: bool = True,
     client_tool_max_iters: int = 6,
@@ -46,28 +45,16 @@ def run_completion(
 ) -> str:
     """Synchronous Anthropic completion. UI-agnostic — used by the web backend.
 
-    Builds messages + system prompt, injects the per-game quick-ref with a
-    prompt-cache breakpoint, registers ``search_game_rules`` (the only
-    information tool), and runs a small tool-use loop to resolve queries.
+    All artifacts are required: caller is responsible for ensuring
+    ``quick_ref_text`` and ``synthesis_text`` are non-empty before calling.
+    Submit gates on the underlying files; if a caller passes an empty
+    string here, that's a worker-side bug worth crashing on.
     """
-    has_synthesis = bool(synthesis_text and synthesis_text.strip())
+    if not quick_ref_text.strip():
+        raise ValueError("run_completion: quick_ref_text is empty")
+    if not synthesis_text.strip():
+        raise ValueError("run_completion: synthesis_text is empty")
 
-    # When synthesis is provided, the reasoning call only needs the latest
-    # screenshot as a visual fallback — synthesis is the primary state source.
-    if has_synthesis and len(image_paths) > 1:
-        logger.info(
-            "%s: synthesis provided; sending only latest image (%s) of %d",
-            log_tag, image_paths[-1].name, len(image_paths),
-        )
-        image_paths = image_paths[-1:]
-    elif len(image_paths) > MAX_IMAGES_PER_REQUEST:
-        logger.warning(
-            "%s: image_paths length %d exceeds %d; trimming to most recent %d",
-            log_tag, len(image_paths), MAX_IMAGES_PER_REQUEST, MAX_IMAGES_PER_REQUEST,
-        )
-        image_paths = image_paths[-MAX_IMAGES_PER_REQUEST:]
-
-    logger.debug("%s building assistant client (timeout=%.1fs)", log_tag, REQUEST_TIMEOUT_SECONDS)
     client = anthropic.Anthropic(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS)
 
     messages: list[dict] = []
@@ -75,47 +62,40 @@ def run_completion(
         messages.append({"role": "user", "content": turn["question"]})
         messages.append({"role": "assistant", "content": turn["response"]})
 
-    current: list[dict] = []
     t_encode = time.monotonic()
-    total_jpeg_bytes = 0
-    for path in image_paths:
-        jpeg = downscale_to_jpeg(path)
-        total_jpeg_bytes += len(jpeg)
-        current.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": base64.b64encode(jpeg).decode("ascii"),
-                },
-            }
-        )
+    jpeg = downscale_to_jpeg(image_path)
+    image_block = {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.b64encode(jpeg).decode("ascii"),
+        },
+    }
     logger.info(
-        "%s encoded %d images in %.2fs, total JPEG bytes=%d",
-        log_tag, len(image_paths), time.monotonic() - t_encode, total_jpeg_bytes,
+        "%s encoded image %s in %.2fs, JPEG bytes=%d",
+        log_tag, image_path.name, time.monotonic() - t_encode, len(jpeg),
     )
 
-    if has_synthesis:
-        current.append({
+    current = [
+        image_block,
+        {
             "type": "text",
             "text": (
                 "## Pre-computed scene synthesis (PRIMARY STATE — the image above is a visual fallback only)\n\n"
                 + synthesis_text.strip()
             ),
-        })
-    current.append({"type": "text", "text": question})
+        },
+        {"type": "text", "text": question},
+    ]
     messages.append({"role": "user", "content": current})
 
-    # Build dynamic system prompt.
-    system_text = SYSTEM_PROMPT
-    if has_synthesis:
-        system_text += "\n\n" + SYNTHESIS_NOTE
-    if quick_ref_text and quick_ref_text.strip():
-        system_text += (
-            "\n\n---\n\n## Active game quick reference\n\n" + quick_ref_text.strip()
-        )
-    system_text += "\n\n" + CORPUS_SEARCH_NOTE
+    system_text = (
+        SYSTEM_PROMPT
+        + "\n\n" + SYNTHESIS_NOTE
+        + "\n\n---\n\n## Active game quick reference\n\n" + quick_ref_text.strip()
+        + "\n\n" + CORPUS_SEARCH_NOTE
+    )
     goal = goal_text.strip() if goal_text else ""
     if goal:
         system_text += (
@@ -129,7 +109,6 @@ def run_completion(
             log_tag, len(goal), goal.count("\n") + 1,
         )
 
-    # Wrap in a list with a single cache_control breakpoint for prompt caching.
     if enable_prompt_cache:
         system_param: object = [{
             "type": "text",
@@ -140,7 +119,6 @@ def run_completion(
         system_param = system_text
 
     tools = [search_game_rules_tool()]
-
     base_kwargs = dict(
         model=model,
         system=system_param,
@@ -155,8 +133,7 @@ def run_completion(
         enable_prompt_cache,
     )
 
-    response = None
-    for iteration in range(max(1, int(client_tool_max_iters))):
+    for iteration in range(client_tool_max_iters):
         t_call = time.monotonic()
         response = client.messages.create(messages=messages, **base_kwargs)
         elapsed = time.monotonic() - t_call
@@ -166,7 +143,7 @@ def run_completion(
         )
 
         if response.stop_reason != "tool_use":
-            break
+            return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
         # Client-side tool use loop. Append the assistant turn, dispatch each
         # tool_use, append tool_result blocks, then re-call.
@@ -186,22 +163,14 @@ def run_completion(
                 logger.info("%s search_game_rules returned %d hits", log_tag, len(results))
                 content_text = format_search_game_rules_result(results, query)
             else:
-                logger.warning("%s unknown client tool %r; returning empty result", log_tag, name)
-                content_text = f"(no handler for tool {name!r})"
+                raise RuntimeError(f"run_completion: unknown client tool {name!r}")
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tu_id,
                 "content": content_text,
             })
-        if not tool_results:
-            logger.warning("%s stop_reason=tool_use but no tool_use blocks in content; exiting loop", log_tag)
-            break
         messages.append({"role": "user", "content": tool_results})
-    else:
-        logger.warning(
-            "%s tool-use loop hit max_iters=%d; returning current text", log_tag, client_tool_max_iters,
-        )
 
-    if response is None:
-        return ""
-    return "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
+    raise RuntimeError(
+        f"run_completion: tool-use loop exceeded client_tool_max_iters={client_tool_max_iters}"
+    )

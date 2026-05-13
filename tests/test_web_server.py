@@ -65,24 +65,45 @@ def test_get_state_returns_snapshot_shape(client):
     assert body["has_api_key"] is False
 
 
-def test_has_api_key_reflects_keyring(client, fake_keyring):
-    assert client.get("/api/api_key/has").json() == {"has_key": False}
+def test_has_api_key_reflects_keyring_in_snapshot(client, fake_keyring):
+    assert client.get("/api/state").json()["has_api_key"] is False
     config_module.set_api_key("sk-ant-test")
-    assert client.get("/api/api_key/has").json() == {"has_key": True}
+    assert client.get("/api/state").json()["has_api_key"] is True
 
 
 # ---- window ----
 
 
-def test_put_window_updates_selected_hwnd(client):
+def test_put_window_updates_selected_hwnd_when_window_exists(client, monkeypatch):
+    monkeypatch.setattr(web_server, "list_windows", lambda: [(12345, "Test Window")])
     resp = client.put("/api/window", json={"hwnd": 12345})
     assert resp.status_code == 200
     assert resp.json() == {"selected_hwnd": 12345}
     assert client.get("/api/state").json()["selected_hwnd"] == 12345
 
 
+def test_put_window_404_when_hwnd_unknown(client, monkeypatch):
+    monkeypatch.setattr(web_server, "list_windows", lambda: [(1, "Other")])
+    resp = client.put("/api/window", json={"hwnd": 99999})
+    assert resp.status_code == 404
+
+
+def test_put_window_404_leaves_prior_selection_unchanged(client, monkeypatch):
+    """Regression: validation runs before mutation, so a stale hwnd does
+    NOT poison the capture timer with an invalid handle."""
+    monkeypatch.setattr(web_server, "list_windows", lambda: [(11, "Existing")])
+    # First, validly select hwnd 11.
+    client.put("/api/window", json={"hwnd": 11}).raise_for_status()
+    assert client.get("/api/state").json()["selected_hwnd"] == 11
+    # Now try a stale hwnd — windows list no longer includes 22.
+    monkeypatch.setattr(web_server, "list_windows", lambda: [(11, "Existing")])
+    resp = client.put("/api/window", json={"hwnd": 22})
+    assert resp.status_code == 404
+    # State retains the prior valid selection.
+    assert client.get("/api/state").json()["selected_hwnd"] == 11
+
+
 def test_put_window_null_clears(client):
-    client.put("/api/window", json={"hwnd": 99})
     resp = client.put("/api/window", json={"hwnd": None})
     assert resp.json() == {"selected_hwnd": None}
 
@@ -187,6 +208,86 @@ def test_submit_412_when_no_window_selected(client, fake_keyring):
     resp = client.post("/api/submit", json={"question": "real question"})
     assert resp.status_code == 412
     assert "window" in resp.json()["detail"]
+
+
+def test_submit_412_when_no_active_game(client, fake_keyring):
+    """API key + window set, but no game identified yet → fail loud."""
+    from app import games
+    config_module.set_api_key("sk-ant-test")
+    with client.state.lock:
+        client.state.selected_hwnd = 12345
+        client.state.active_game_id = None
+    resp = client.post("/api/submit", json={"question": "q"})
+    assert resp.status_code == 412
+    assert "active supported game" in resp.json()["detail"]
+
+
+def test_submit_412_when_active_game_unsupported(client, fake_keyring):
+    """Game marked is_supported=False → fail loud, no fallback."""
+    from app import games
+    config_module.set_api_key("sk-ant-test")
+    games.upsert_game(games.GameEntry(
+        game_id="obscure-game", display_name="Obscure",
+        is_game=True, is_supported=False,
+    ))
+    with client.state.lock:
+        client.state.selected_hwnd = 12345
+        client.state.active_game_id = "obscure-game"
+    resp = client.post("/api/submit", json={"question": "q"})
+    assert resp.status_code == 412
+    assert "unsupported" in resp.json()["detail"]
+
+
+def test_submit_412_when_no_wiki_url(client, fake_keyring):
+    from app import games
+    config_module.set_api_key("sk-ant-test")
+    games.upsert_game(games.GameEntry(
+        game_id="g", display_name="G",
+        is_game=True, is_supported=True, wiki_url=None,
+    ))
+    with client.state.lock:
+        client.state.selected_hwnd = 12345
+        client.state.active_game_id = "g"
+    resp = client.post("/api/submit", json={"question": "q"})
+    assert resp.status_code == 412
+    assert "wiki_url" in resp.json()["detail"]
+
+
+def test_submit_412_when_quick_ref_missing(client, fake_keyring):
+    from app import games
+    from app.wiki import storage as wiki_storage
+    config_module.set_api_key("sk-ant-test")
+    games.upsert_game(games.GameEntry(
+        game_id="g", display_name="G",
+        is_game=True, is_supported=True,
+        wiki_url="https://e/", wiki_api_url="https://e/api.php", wiki_root_page="Main_Page",
+    ))
+    wiki_storage.ensure_wiki_dirs("g")
+    with client.state.lock:
+        client.state.selected_hwnd = 12345
+        client.state.active_game_id = "g"
+    resp = client.post("/api/submit", json={"question": "q"})
+    assert resp.status_code == 412
+    assert "quick_ref" in resp.json()["detail"]
+
+
+def test_submit_412_when_schema_missing(client, fake_keyring):
+    from app import games
+    from app.wiki import storage as wiki_storage
+    config_module.set_api_key("sk-ant-test")
+    games.upsert_game(games.GameEntry(
+        game_id="g", display_name="G",
+        is_game=True, is_supported=True,
+        wiki_url="https://e/", wiki_api_url="https://e/api.php", wiki_root_page="Main_Page",
+    ))
+    wiki_storage.ensure_wiki_dirs("g")
+    wiki_storage.quick_ref_path("g").write_text("quick ref body", encoding="utf-8")
+    with client.state.lock:
+        client.state.selected_hwnd = 12345
+        client.state.active_game_id = "g"
+    resp = client.post("/api/submit", json={"question": "q"})
+    assert resp.status_code == 412
+    assert "perception schema" in resp.json()["detail"]
 
 
 # ---- api key ----

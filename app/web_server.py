@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import shutil
-import sys
 import threading
 import time
 import traceback
@@ -33,8 +32,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import games
-from app.assistant_client import MAX_IMAGES_PER_REQUEST, run_completion
-from app.capture import capture_window, list_windows
+from app.assistant_client import run_completion
+from app.capture import capture_window, is_window, list_windows
 from app.config import get_api_key, set_api_key
 from app.hotkey import DEFAULT_HOTKEY, HotkeyManager
 from app.perception import schema as perception_schema
@@ -109,6 +108,15 @@ class WebState:
         self.hotkey.start()
         self._timer_thread = threading.Thread(target=self._timer_loop, name="capture-timer", daemon=True)
         self._timer_thread.start()
+        # Catch up the post-crawl chain for any game that has pages on disk
+        # but is missing quick_ref or perception schema (e.g. previous run
+        # was killed mid-build, or had no API key at the time). The scan is
+        # idempotent — games that are already complete or in-flight no-op.
+        threading.Thread(
+            target=self._scan_games_for_post_crawl,
+            name="startup-post-crawl-scan",
+            daemon=True,
+        ).start()
         logger.info("WebState started")
 
     def shutdown(self) -> None:
@@ -153,12 +161,33 @@ class WebState:
         """Take a capture of the selected window into the active session folder.
 
         Returns event payload or None if no window selected / capture failed.
-        Broadcasts capture_saved on success.
+        Broadcasts capture_saved on success. If the selected hwnd has died
+        (e.g. the game rebuilt its window on a fullscreen toggle), clears
+        the selection and broadcasts ``window_lost`` so the timer stops
+        spamming errors.
         """
         with self.lock:
             hwnd = self.selected_hwnd
         if hwnd is None:
             logger.info("capture_now source=%s aborted: no window selected", source)
+            return None
+        if not is_window(int(hwnd)):
+            logger.warning(
+                "capture_now source=%s: hwnd %s is no longer a live window; "
+                "clearing selection (game may have rebuilt its handle)", source, hwnd,
+            )
+            with self.lock:
+                if self.selected_hwnd == hwnd:
+                    self.selected_hwnd = None
+                self.active_game_id = None
+            self.schedule_broadcast({"type": "window_lost", "hwnd": hwnd, "source": source})
+            self.schedule_broadcast({
+                "type": "active_game_changed",
+                "game_id": None, "display_name": None, "is_game": False,
+                "is_not_a_game": False, "is_supported": True,
+                "crawl_state": "none", "page_count": 0, "wiki_url": None,
+                "has_quick_ref": False, "has_perception_schema": False,
+            })
             return None
         try:
             png_bytes = capture_window(int(hwnd))
@@ -206,35 +235,55 @@ class WebState:
     def _set_active_game(self, game_id: str | None) -> None:
         """Update active_game_id, broadcast active_game_changed, ensure the
         crawler slot is dedicated to ``game_id``.
+
+        The broadcast carries fresh on-disk state (page_count, has_quick_ref,
+        has_perception_schema) so the UI doesn't have to wait for build-chain
+        events to re-learn what's already present from a prior run.
         """
-        entry = None
         display_name = None
         is_game = False
+        is_supported = True
         crawl_state = "none"
         page_count = 0
         wiki_url = None
+        has_quick_ref = False
+        has_perception_schema = False
         if game_id is not None and game_id != games.NOT_A_GAME:
             entry = games.get_game(game_id)
             if entry is not None:
                 display_name = entry.display_name
                 is_game = entry.is_game
+                is_supported = entry.is_supported
                 crawl_state = entry.crawl_state
-                page_count = entry.page_count
                 wiki_url = entry.wiki_url
+            page_count = wiki_storage.page_count_on_disk(game_id)
+            has_quick_ref = wiki_storage.quick_ref_path(game_id).exists()
+            has_perception_schema = wiki_storage.perception_schema_path(game_id).exists()
         with self.lock:
             self.active_game_id = game_id
-        logger.info("active game -> %s (%s)", game_id, display_name)
+        logger.info(
+            "active game -> %s (%s) pages=%d quick_ref=%s schema=%s",
+            game_id, display_name, page_count, has_quick_ref, has_perception_schema,
+        )
         self.schedule_broadcast({
             "type": "active_game_changed",
             "game_id": game_id,
             "display_name": display_name,
             "is_game": is_game,
             "is_not_a_game": game_id == games.NOT_A_GAME,
+            "is_supported": is_supported,
             "crawl_state": crawl_state,
             "page_count": page_count,
             "wiki_url": wiki_url,
+            "has_quick_ref": has_quick_ref,
+            "has_perception_schema": has_perception_schema,
         })
         self._ensure_active_crawler(game_id)
+        # Catch up post-crawl builds for an existing game with pages on disk.
+        # No-op when artifacts are already present; this is the "user
+        # re-opens a game whose chain was previously stuck" recovery path.
+        if game_id and game_id != games.NOT_A_GAME:
+            self._ensure_post_crawl_builds(game_id)
 
     def _ensure_active_crawler(self, game_id: str | None, *, force_restart: bool = False) -> None:
         """Ensure the single crawler slot matches ``game_id``.
@@ -404,6 +453,9 @@ class WebState:
             if not api_key:
                 logger.info("discover_and_crawl: no API key; aborting")
                 return
+            if not entry.is_supported:
+                logger.info("discover_and_crawl: game %s marked unsupported; aborting", game_id)
+                return
             if not entry.wiki_url:
                 logger.info("discover_and_crawl: discovering wiki for %s", game_id)
                 self.schedule_broadcast({
@@ -411,17 +463,36 @@ class WebState:
                     "game_id": game_id,
                     "display_name": entry.display_name,
                 })
-                candidate = wiki_discovery.discover_wiki(
-                    entry.display_name,
-                    api_key=api_key,
-                    model=self.settings.get("wiki_discovery_model", "claude-sonnet-4-6"),
-                    user_agent=self.settings.get("wiki_user_agent", "game_assistant"),
-                    rate_seconds=float(self.settings.get("wiki_rate_seconds", 1.0)),
-                )
-                if candidate is None:
-                    logger.info("discover_and_crawl: no wiki found for %s", game_id)
+                try:
+                    candidate = wiki_discovery.discover_wiki(
+                        entry.display_name,
+                        api_key=api_key,
+                        model=self.settings.get("wiki_discovery_model", "claude-sonnet-4-6"),
+                        user_agent=self.settings.get("wiki_user_agent", "game_assistant"),
+                        rate_seconds=float(self.settings.get("wiki_rate_seconds", 1.0)),
+                    )
+                except wiki_discovery.NoWikiAvailable as exc:
+                    logger.info(
+                        "discover_and_crawl: %s marked unsupported (LLM reported no wiki): %s",
+                        game_id, exc,
+                    )
+                    entry.is_supported = False
+                    games.upsert_game(entry)
+                    self._set_active_game(game_id)
                     self.schedule_broadcast({
                         "type": "wiki_not_found",
+                        "game_id": game_id,
+                        "display_name": entry.display_name,
+                        "reason": str(exc),
+                    })
+                    return
+                if candidate is None:
+                    logger.info(
+                        "discover_and_crawl: discovery transient-failed for %s; leaving state for retry",
+                        game_id,
+                    )
+                    self.schedule_broadcast({
+                        "type": "wiki_discovery_failed",
                         "game_id": game_id,
                         "display_name": entry.display_name,
                     })
@@ -452,7 +523,7 @@ class WebState:
             def _on_crawl_event(ev: dict) -> None:
                 self.schedule_broadcast(ev)
                 if ev.get("type") in ("crawl_progress", "crawl_done"):
-                    self._maybe_kick_off_post_crawl_builds(game_id)
+                    self._ensure_post_crawl_builds(game_id)
 
             crawler = Crawler(
                 game_id=game_id,
@@ -469,7 +540,7 @@ class WebState:
             # Kick post-crawl builds eagerly: a previous run may already have
             # left pages on disk without quick_ref/schema (e.g. cancelled
             # before the build finished). This is idempotent.
-            self._maybe_kick_off_post_crawl_builds(game_id)
+            self._ensure_post_crawl_builds(game_id)
             result = crawler.run()
 
             entry = games.get_game(game_id) or entry
@@ -487,7 +558,7 @@ class WebState:
             # Final pass — picks up the case where the crawler exits without
             # ever firing crawl_progress (e.g. wrote a single page on a wiki
             # smaller than state_save_every).
-            self._maybe_kick_off_post_crawl_builds(game_id)
+            self._ensure_post_crawl_builds(game_id)
         except Exception:
             logger.exception("_discover_and_crawl failed for %s", game_id)
         finally:
@@ -502,10 +573,14 @@ class WebState:
                     self._active_crawler_game_id = None
                     self._active_crawler_thread = None
 
-    def _maybe_kick_off_post_crawl_builds(self, game_id: str) -> None:
-        """One-shot per game: build quick_ref then perception schema in a
-        background thread when their outputs are missing and the corpus has
-        ≥1 page on disk. Idempotent + reentrancy-guarded.
+    def _ensure_post_crawl_builds(self, game_id: str) -> None:
+        """Ensure quick_ref + perception schema exist for ``game_id``.
+
+        Idempotent. Called from many places: crawler progress/done events,
+        app startup, API-key-set, window-select. If the artifacts are
+        already on disk → no-op. If a build is already in flight for this
+        game → no-op. Otherwise dispatch a background thread that builds
+        whatever is missing.
         """
         if not game_id or game_id == games.NOT_A_GAME:
             return
@@ -568,10 +643,28 @@ class WebState:
             daemon=True,
         ).start()
 
+    def _scan_games_for_post_crawl(self) -> None:
+        """Walk the registry; call _ensure_post_crawl_builds for every game
+        that has pages on disk. The function itself short-circuits when an
+        artifact is already present or a build is already running.
+
+        Called from: app startup, after API key is set, on window-select.
+        """
+        for entry in games.list_games():
+            if not entry.is_supported or not entry.is_game:
+                continue
+            self._ensure_post_crawl_builds(entry.game_id)
+
     # ---- Submit ----
 
     def submit(self, question: str) -> dict[str, Any]:
-        """Validate, take a fresh capture, dispatch run_completion on a worker thread."""
+        """Validate, take a fresh capture, dispatch run_completion on a worker thread.
+
+        Fails loud (412) on any missing prerequisite: API key, window,
+        active supported game, wiki_url, quick_ref, perception schema.
+        No "compose-without" path — the worker is invoked only when every
+        required artifact is on disk for the active game.
+        """
         question = question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="empty question")
@@ -585,61 +678,100 @@ class WebState:
                 raise HTTPException(status_code=412, detail="no window selected")
             if self.in_flight:
                 raise HTTPException(status_code=409, detail="a submit is already in flight")
+            active_game_id = self.active_game_id
 
-        # Fresh capture before request. If it fails (e.g. window minimized),
-        # we proceed with whatever older shots are in the session folder.
-        # Only hard-fail when there are no shots at all.
-        self.capture_now(source="submit")
+        if not active_game_id or active_game_id == games.NOT_A_GAME:
+            raise HTTPException(
+                status_code=412,
+                detail=f"submit refused: no active supported game (active_game_id={active_game_id!r})",
+            )
 
+        entry = games.get_game(active_game_id)
+        if entry is None:
+            raise HTTPException(
+                status_code=412,
+                detail=f"submit refused: active_game_id={active_game_id!r} not in registry",
+            )
+        if not entry.is_supported:
+            raise HTTPException(
+                status_code=412,
+                detail=(
+                    f"submit refused: game {active_game_id!r} is marked unsupported "
+                    "(LLM searched and reported no usable community wiki). This game "
+                    "is out of scope for this version of the app."
+                ),
+            )
+        if not entry.wiki_url:
+            raise HTTPException(
+                status_code=412,
+                detail=(
+                    f"submit refused: game {active_game_id!r} has no wiki_url yet "
+                    f"(crawl_state={entry.crawl_state!r}). Wiki discovery is in "
+                    "progress or has not been triggered."
+                ),
+            )
+
+        on_disk_pages = wiki_storage.page_count_on_disk(active_game_id)
+        qp = wiki_storage.quick_ref_path(active_game_id)
+        sp = wiki_storage.perception_schema_path(active_game_id)
+        if not qp.exists():
+            raise HTTPException(
+                status_code=412,
+                detail=(
+                    f"submit refused: quick_ref not present for {active_game_id!r} "
+                    f"(crawl_state={entry.crawl_state!r}, pages_on_disk={on_disk_pages}). "
+                    "Build chain has not produced _quick_ref.md yet."
+                ),
+            )
+        if not sp.exists():
+            raise HTTPException(
+                status_code=412,
+                detail=(
+                    f"submit refused: perception schema not present for {active_game_id!r} "
+                    f"(crawl_state={entry.crawl_state!r}, pages_on_disk={on_disk_pages}). "
+                    "Build chain has not produced _perception_schema.md yet."
+                ),
+            )
+
+        # Fresh capture before request. No fallback to older shots —
+        # capture must succeed or submit fails loud.
+        capture_event = self.capture_now(source="submit")
+        if capture_event is None:
+            raise HTTPException(
+                status_code=500,
+                detail="submit refused: capture_window failed (window minimized/closed?)",
+            )
+
+        # Stage 1 + 2 see the last N frames (temporal context); the
+        # reasoning call sees only the latest. Caller of run_completion
+        # picks which image to send — see _submit_worker.
         last_n = int(self.settings.get("last_n", 5))
         image_paths = sorted(
             self.session.folder.glob("shot_*.png"),
             key=lambda p: p.stat().st_mtime,
         )[-last_n:]
-        if not image_paths:
-            raise HTTPException(status_code=500, detail="no screenshots in session folder")
+
+        # Refresh FTS5 index if it's out of date with what's on disk.
+        indexed = wiki_search.index_page_count(active_game_id)
+        if indexed != on_disk_pages:
+            logger.info(
+                "submit: refreshing FTS5 index for %s (on_disk=%d, indexed=%d)",
+                active_game_id, on_disk_pages, indexed,
+            )
+            wiki_search.build_index(active_game_id)
+
+        quick_ref_text = qp.read_text(encoding="utf-8")
 
         model = self.settings.get("model", "claude-sonnet-4-6")
-
         active_goal = self.settings.get("active_goal", "") or ""
         goal_text = load_goal(active_goal) if active_goal else ""
-
-        with self.lock:
-            active_game_id = self.active_game_id
-
-        is_real_game = bool(active_game_id) and active_game_id != games.NOT_A_GAME
-        on_disk_pages = wiki_storage.page_count_on_disk(active_game_id) if is_real_game else 0
-
-        if is_real_game and on_disk_pages > 0:
-            indexed = wiki_search.index_page_count(active_game_id)
-            if indexed != on_disk_pages:
-                logger.info(
-                    "submit: refreshing FTS5 index for %s (on_disk=%d, indexed=%d)",
-                    active_game_id, on_disk_pages, indexed,
-                )
-                wiki_search.build_index(active_game_id)
-
-        quick_ref_text: str | None = None
-        if is_real_game:
-            qp = wiki_storage.quick_ref_path(active_game_id)
-            if qp.exists():
-                quick_ref_text = qp.read_text(encoding="utf-8")
-
-        # corpus_game_id is used by the corpus_search tool; perception_game_id
-        # by load_schema + stage1. Either may be None for this submit — the
-        # worker composes the prompt from whatever ingredients are present.
-        corpus_game_id: str | None = active_game_id if (is_real_game and on_disk_pages > 0) else None
-        perception_game_id: str | None = active_game_id if is_real_game else None
-
-        logger.info(
-            "submit: ingredients game_id=%s pages=%d quick_ref=%s perception_candidate=%s",
-            active_game_id, on_disk_pages,
-            "present" if quick_ref_text else "absent",
-            "yes" if perception_game_id else "no",
-        )
-
         enable_prompt_cache = bool(self.settings.get("enable_prompt_cache", True))
         client_tool_max_iters = int(self.settings.get("client_tool_max_iters", 6))
+
+        logger.info(
+            "submit: ready game_id=%s pages=%d perception_frames=%d latest=%s",
+            active_game_id, on_disk_pages, len(image_paths), image_paths[-1].name,
+        )
 
         started_iso = datetime.now(timezone.utc).isoformat()
         with self.lock:
@@ -658,7 +790,7 @@ class WebState:
             "question_excerpt": excerpt,
             "model": model,
             "n_images": len(image_paths),
-            "corpus_game_id": corpus_game_id,
+            "corpus_game_id": active_game_id,
             "started_iso": started_iso,
         })
 
@@ -666,7 +798,7 @@ class WebState:
             target=self._submit_worker,
             args=(
                 api_key, model, history_snapshot, goal_text, question, image_paths,
-                quick_ref_text, corpus_game_id, perception_game_id, enable_prompt_cache, client_tool_max_iters,
+                quick_ref_text, active_game_id, enable_prompt_cache, client_tool_max_iters,
             ),
             name="submit-worker",
             daemon=True,
@@ -682,18 +814,15 @@ class WebState:
         goal_text: str,
         question: str,
         image_paths: list,
-        quick_ref_text: str | None,
-        corpus_game_id: str | None,
-        perception_game_id: str | None,
+        quick_ref_text: str,
+        game_id: str,
         enable_prompt_cache: bool,
         client_tool_max_iters: int,
     ) -> None:
         t_start = time.monotonic()
 
         def _corpus_search(query: str, max_results: int) -> list[dict]:
-            if corpus_game_id is None:
-                return []
-            return wiki_search.search(corpus_game_id, query, max_results=max_results)
+            return wiki_search.search(game_id, query, max_results=max_results)
 
         # Single outer catch covers BOTH the perception pipeline and the
         # reasoning call. Any raise (stage1/stage2 LLM failures, reasoning
@@ -701,46 +830,37 @@ class WebState:
         # so the UI sees the failure. The single catch site is the outermost
         # worker; there is no intermediate try/except.
         try:
-            synthesis_text: str | None = None
-            schema_text = perception_schema.load_schema(perception_game_id) if image_paths else None
-            if schema_text is not None:
-                stage1_model = self.settings.get("perception_stage1_model", "claude-haiku-4-5-20251001")
-                stage2_model = self.settings.get("perception_stage2_model", "claude-sonnet-4-6")
-                logger.info(
-                    "perception: starting stage-1 fill game_id=%s images=%d schema_chars=%d",
-                    perception_game_id, len(image_paths), len(schema_text),
-                )
-                t_stage1 = time.monotonic()
-                sidecars = perception_stage1.enumerate_images(
-                    image_paths,
-                    api_key=api_key,
-                    model=stage1_model,
-                    schema_text=schema_text,
-                    game_id=perception_game_id,
-                    log_tag="stage1",
-                )
-                logger.info(
-                    "perception: stage-1 fill done in %.2fs (filled=%d/%d)",
-                    time.monotonic() - t_stage1,
-                    sum(1 for s in sidecars if s is not None),
-                    len(sidecars),
-                )
-                t_stage2 = time.monotonic()
-                synthesis_text = perception_stage2.synthesize(
-                    sidecars=sidecars,
-                    image_filenames=[p.name for p in image_paths],
-                    schema_text=schema_text,
-                    question=question,
-                    api_key=api_key,
-                    model=stage2_model,
-                    log_tag="stage2",
-                )
-                logger.info("perception: stage-2 synthesis done in %.2fs", time.monotonic() - t_stage2)
-            else:
-                logger.info(
-                    "perception: skipped (game_id=%s, images=%d, schema_present=False) — reasoning will see all images",
-                    perception_game_id, len(image_paths),
-                )
+            schema_text = perception_schema.load_schema(game_id)
+            stage1_model = self.settings.get("perception_stage1_model", "claude-haiku-4-5-20251001")
+            stage2_model = self.settings.get("perception_stage2_model", "claude-sonnet-4-6")
+            logger.info(
+                "perception: starting stage-1 fill game_id=%s images=%d schema_chars=%d",
+                game_id, len(image_paths), len(schema_text),
+            )
+            t_stage1 = time.monotonic()
+            sidecars = perception_stage1.enumerate_images(
+                image_paths,
+                api_key=api_key,
+                model=stage1_model,
+                schema_text=schema_text,
+                game_id=game_id,
+                log_tag="stage1",
+            )
+            logger.info(
+                "perception: stage-1 fill done in %.2fs (count=%d)",
+                time.monotonic() - t_stage1, len(sidecars),
+            )
+            t_stage2 = time.monotonic()
+            synthesis_text = perception_stage2.synthesize(
+                sidecars=sidecars,
+                image_filenames=[p.name for p in image_paths],
+                schema_text=schema_text,
+                question=question,
+                api_key=api_key,
+                model=stage2_model,
+                log_tag="stage2",
+            )
+            logger.info("perception: stage-2 synthesis done in %.2fs", time.monotonic() - t_stage2)
 
             text = run_completion(
                 api_key=api_key,
@@ -748,7 +868,7 @@ class WebState:
                 history=history,
                 goal_text=goal_text,
                 question=question,
-                image_paths=image_paths,
+                image_path=image_paths[-1],
                 quick_ref_text=quick_ref_text,
                 synthesis_text=synthesis_text,
                 search_game_rules_handler=_corpus_search,
@@ -866,56 +986,51 @@ def create_app(state: WebState | None = None) -> FastAPI:
 
     @app.get("/api/windows")
     def get_windows():
-        try:
-            return [{"hwnd": h, "title": t} for h, t in list_windows()]
-        except Exception:
-            tb = traceback.format_exc()
-            logger.error("list_windows failed:\n%s", tb)
-            raise HTTPException(status_code=500, detail=tb)
+        return [{"hwnd": h, "title": t} for h, t in list_windows()]
 
     @app.put("/api/window")
     async def set_window(req: Request):
         body = await req.json()
         hwnd = body.get("hwnd")
-        with state.lock:
-            state.selected_hwnd = int(hwnd) if hwnd is not None else None
-            new_hwnd = state.selected_hwnd
-            # Clear stale active game until we re-resolve below.
-            state.active_game_id = None
-        logger.info("window selected: %s", new_hwnd)
-        if new_hwnd is None:
+        if hwnd is None:
+            with state.lock:
+                state.selected_hwnd = None
+                state.active_game_id = None
+            logger.info("window cleared")
             state.schedule_broadcast({
                 "type": "active_game_changed",
                 "game_id": None, "display_name": None, "is_game": False,
                 "is_not_a_game": False, "crawl_state": "none", "page_count": 0, "wiki_url": None,
             })
-            return {"selected_hwnd": new_hwnd}
-        # Look up the window title for the chosen hwnd, then dispatch identification.
-        title = None
-        try:
-            for h, t in list_windows():
-                if h == new_hwnd:
-                    title = t
-                    break
-        except Exception:
-            logger.exception("set_window: list_windows failed")
-        if title:
-            threading.Thread(
-                target=state._ensure_game_binding,
-                args=(new_hwnd, title),
-                name=f"identify-{new_hwnd}",
-                daemon=True,
-            ).start()
-        else:
-            logger.warning("set_window: could not resolve title for hwnd=%s", new_hwnd)
-        return {"selected_hwnd": new_hwnd}
+            return {"selected_hwnd": None}
 
-    @app.get("/api/games")
-    def get_games():
-        return {
-            "games": [e.to_dict() for e in games.list_games()],
-            "active_game_id": state.active_game_id,
-        }
+        new_hwnd = int(hwnd)
+        # Validate BEFORE mutating state. Game windows can churn their HWND
+        # between the dropdown render and the PUT (scene reloads, fullscreen
+        # toggles). On a 404 the prior selection stays in effect so the
+        # capture timer doesn't start ticking on an invalid handle.
+        title = next((t for h, t in list_windows() if h == new_hwnd), None)
+        if title is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"hwnd {new_hwnd!r} not in current window list — it may have "
+                    "closed or rebuilt its handle between dropdown render and select. "
+                    "Click 'Refresh windows' and pick again."
+                ),
+            )
+        with state.lock:
+            state.selected_hwnd = new_hwnd
+            # Clear stale active game until identification resolves below.
+            state.active_game_id = None
+        logger.info("window selected: hwnd=%s title=%r", new_hwnd, title)
+        threading.Thread(
+            target=state._ensure_game_binding,
+            args=(new_hwnd, title),
+            name=f"identify-{new_hwnd}",
+            daemon=True,
+        ).start()
+        return {"selected_hwnd": new_hwnd}
 
     @app.post("/api/games/recrawl")
     async def post_recrawl():
@@ -959,14 +1074,16 @@ def create_app(state: WebState | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"game_id {game_id!r} not in registry")
         wdir = wiki_storage.wiki_dir(game_id)
         if wdir.exists():
-            try:
-                shutil.rmtree(wdir)
-            except OSError as exc:
-                logger.exception("reset_corpus: failed to remove %s", wdir)
-                raise HTTPException(status_code=500, detail=f"failed to wipe corpus dir: {exc!r}")
+            shutil.rmtree(wdir)
         entry.crawl_state = "none"
         entry.page_count = 0
         entry.last_crawl_iso = None
+        # Reset is_supported so a re-crawl on a previously-unsupported game
+        # gets another shot at discovery (and the chain after).
+        entry.is_supported = True
+        entry.wiki_url = None
+        entry.wiki_api_url = None
+        entry.wiki_root_page = None
         games.upsert_game(entry)
         state._set_active_game(game_id)
         state._ensure_active_crawler(game_id, force_restart=True)
@@ -979,16 +1096,8 @@ def create_app(state: WebState | None = None) -> FastAPI:
             hwnd = state.selected_hwnd
         if hwnd is None:
             raise HTTPException(status_code=412, detail="no window selected")
-        title = None
-        try:
-            for h, t in list_windows():
-                if h == hwnd:
-                    title = t
-                    break
-        except Exception:
-            tb = traceback.format_exc()
-            raise HTTPException(status_code=500, detail=tb)
-        if not title:
+        title = next((t for h, t in list_windows() if h == hwnd), None)
+        if title is None:
             raise HTTPException(status_code=404, detail=f"hwnd {hwnd} not found in window list")
         games.clear_binding(title)
         threading.Thread(
@@ -1008,6 +1117,7 @@ def create_app(state: WebState | None = None) -> FastAPI:
             "game_id": entry.game_id,
             "display_name": entry.display_name,
             "is_game": entry.is_game,
+            "is_supported": entry.is_supported,
             "sitename": meta.get("sitename", ""),
             "wiki_url": entry.wiki_url,
             "api_url": entry.wiki_api_url,
@@ -1023,80 +1133,9 @@ def create_app(state: WebState | None = None) -> FastAPI:
     def get_wiki_games():
         return {"games": [_wiki_game_entry(e) for e in games.list_games() if e.is_game]}
 
-    @app.put("/api/wiki/games/{game_id}")
-    async def put_wiki_game(game_id: str, req: Request):
-        entry = games.get_game(game_id)
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"game_id {game_id!r} not found")
-        body = await req.json()
-        if "wiki_url" in body:
-            entry.wiki_url = (body.get("wiki_url") or "").strip() or None
-        if "api_url" in body:
-            entry.wiki_api_url = (body.get("api_url") or "").strip() or None
-        if "root_page" in body:
-            entry.wiki_root_page = (body.get("root_page") or "").strip() or None
-        entry.crawl_state = "none"
-        entry.last_crawl_iso = None
-        games.upsert_game(entry)
-        # Single-slot rule: only the active game has a crawler. If the edited
-        # game is the active one, restart its crawler with the new URL.
-        # Otherwise the new settings persist and the crawler will use them
-        # the next time this game becomes active.
-        with state.lock:
-            is_active = state.active_game_id == game_id
-        if is_active:
-            state._ensure_active_crawler(game_id, force_restart=True)
-        logger.info(
-            "wiki edit: game_id=%s wiki_url=%s api_url=%s root_page=%s active=%s",
-            game_id, entry.wiki_url, entry.wiki_api_url, entry.wiki_root_page, is_active,
-        )
-        return _wiki_game_entry(entry)
-
-    @app.delete("/api/wiki/games/{game_id}/corpus")
-    def delete_wiki_corpus(game_id: str):
-        entry = games.get_game(game_id)
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"game_id {game_id!r} not found")
-        wdir = wiki_storage.wiki_dir(game_id)
-        if wdir.exists():
-            shutil.rmtree(wdir)
-        entry.wiki_url = None
-        entry.wiki_api_url = None
-        entry.wiki_root_page = None
-        entry.crawl_state = "none"
-        entry.page_count = 0
-        entry.last_crawl_iso = None
-        games.upsert_game(entry)
-        with state.lock:
-            if state.active_game_id == game_id:
-                state._set_active_game(game_id)
-        logger.info("wiki delete corpus: game_id=%s wiped %s", game_id, wdir)
-        return _wiki_game_entry(entry)
-
-    @app.post("/api/wiki/games/{game_id}/rediscover")
-    def post_wiki_rediscover(game_id: str):
-        entry = games.get_game(game_id)
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"game_id {game_id!r} not found")
-        wdir = wiki_storage.wiki_dir(game_id)
-        if wdir.exists():
-            shutil.rmtree(wdir)
-        entry.wiki_url = None
-        entry.wiki_api_url = None
-        entry.wiki_root_page = None
-        entry.crawl_state = "none"
-        entry.page_count = 0
-        entry.last_crawl_iso = None
-        games.upsert_game(entry)
-        with state.lock:
-            is_active = state.active_game_id == game_id
-        if is_active:
-            state._ensure_active_crawler(game_id, force_restart=True)
-        logger.info("wiki rediscover: game_id=%s active=%s", game_id, is_active)
-        return _wiki_game_entry(entry)
-
-    # ----- Settings page: perception schema -----
-
+    # Read-only schema view (developer transparency). No PUT, no regenerate —
+    # manual recovery affordances were removed; the build chain produces the
+    # schema automatically and is the only path that should write it.
     @app.get("/api/perception/schema/{game_id}")
     def get_perception_schema(game_id: str):
         if games.get_game(game_id) is None:
@@ -1105,44 +1144,6 @@ def create_app(state: WebState | None = None) -> FastAPI:
         if not sp.exists():
             raise HTTPException(status_code=404, detail=f"_perception_schema.md not present for {game_id!r}")
         return {"game_id": game_id, "content": sp.read_text(encoding="utf-8")}
-
-    @app.put("/api/perception/schema/{game_id}")
-    async def put_perception_schema(game_id: str, req: Request):
-        if games.get_game(game_id) is None:
-            raise HTTPException(status_code=404, detail=f"game_id {game_id!r} not found")
-        body = await req.json()
-        content = body.get("content", "")
-        sp = wiki_storage.perception_schema_path(game_id)
-        wiki_storage.atomic_write_text(sp, content)
-        logger.info("perception schema write: game_id=%s chars=%d", game_id, len(content))
-        return {"game_id": game_id, "content": content}
-
-    @app.post("/api/perception/schema/{game_id}/regenerate")
-    def post_perception_schema_regenerate(game_id: str):
-        if games.get_game(game_id) is None:
-            raise HTTPException(status_code=404, detail=f"game_id {game_id!r} not found")
-        api_key = get_api_key()
-        if not api_key:
-            raise HTTPException(status_code=412, detail="no API key set")
-        if not wiki_storage.quick_ref_path(game_id).exists():
-            raise HTTPException(
-                status_code=412,
-                detail=f"_quick_ref.md missing for {game_id!r} — re-crawl first",
-            )
-
-        def _run():
-            try:
-                perception_schema_builder.build_perception_schema(
-                    game_id,
-                    api_key=api_key,
-                    model=state.settings.get("schema_builder_model", "claude-sonnet-4-6"),
-                )
-                state.schedule_broadcast({"type": "perception_schema_rebuilt", "game_id": game_id})
-            except Exception:
-                logger.exception("regenerate perception schema failed for %s", game_id)
-
-        threading.Thread(target=_run, name=f"schema-rebuild-{game_id}", daemon=True).start()
-        return {"ok": True, "game_id": game_id}
 
     @app.post("/api/capture")
     def manual_capture():
@@ -1234,10 +1235,6 @@ def create_app(state: WebState | None = None) -> FastAPI:
         question = body.get("question", "")
         return state.submit(question)
 
-    @app.get("/api/api_key/has")
-    def has_api_key():
-        return {"has_key": bool(get_api_key())}
-
     @app.put("/api/api_key")
     async def put_api_key(req: Request):
         body = await req.json()
@@ -1245,6 +1242,14 @@ def create_app(state: WebState | None = None) -> FastAPI:
         if not key:
             raise HTTPException(status_code=400, detail="missing key")
         set_api_key(key)
+        # Adding a key may unblock games whose post-crawl chain was waiting
+        # on it. Scan the registry now so the chain resumes without
+        # requiring app restart or window-reselect.
+        threading.Thread(
+            target=state._scan_games_for_post_crawl,
+            name="api-key-post-crawl-scan",
+            daemon=True,
+        ).start()
         return {"ok": True}
 
     # ----- WebSocket -----

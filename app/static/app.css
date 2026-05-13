@@ -76,8 +76,18 @@ button {
 
 button:hover { background: #3a7be8; }
 button:disabled { background: #444; color: #888; cursor: not-allowed; }
-button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
-button.ghost:hover { background: var(--panel); }
+button.ghost, a.button-link {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  text-decoration: none;
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+button.ghost:hover, a.button-link:hover { background: var(--panel); }
 
 .question-label, .chat-label {
   color: var(--muted);

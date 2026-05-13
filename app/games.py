@@ -67,13 +67,17 @@ class GameEntry:
     last_crawl_iso: str | None = None
     discovery_confidence: float | None = None
     is_game: bool = True
+    # Set to False when discovery searched but found no usable community
+    # wiki. Submit refuses on these games (raw 412) — no fallback path.
+    is_supported: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "GameEntry":
-        return cls(**{k: d.get(k, getattr(cls, k, None)) for k in cls.__dataclass_fields__})
+        fields = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in d.items() if k in fields})
 
 
 def _load_raw() -> dict:

@@ -226,7 +226,12 @@ Return ONLY a JSON object inside a single ```json code block, with this shape:
 
 - `api_url`: the MediaWiki action API endpoint. For a Fandom wiki the pattern is `https://<slug>.fandom.com/api.php`. For independent MediaWiki installs it is usually `<wiki_url>/api.php` or `<wiki_url_root>/w/api.php`. Make your best guess from the URL structure.
 - `root_page`: the wiki's main/landing page title (usually "Main_Page", sometimes localized).
-- If no real community wiki exists for this game, return an empty JSON object `{}` with no fields.
+
+If, after using your web_search budget, you cannot find a usable community wiki for this game, return:
+```json
+{"no_wiki_known": true, "reason": "short explanation of what you tried"}
+```
+This signals "this game is not supported by the assistant" and is treated as a permanent verdict — only return it when you're confident no community wiki exists, not when you simply ran out of search attempts on a wiki that probably does exist.
 """
 
 

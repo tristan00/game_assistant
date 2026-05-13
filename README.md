@@ -87,9 +87,9 @@ All settings persist across launches.
 - **Global hotkey** — type a chord like `Ctrl+Alt+S`.
 - **Prompt cache** — caches the system prompt across requests.
 
-**Game knowledge sources:** one card per game the app has seen. Edit the wiki URL/API URL/root page to point at a different wiki (saving while that game is active restarts the crawler; saving while another game is active just persists). Delete the corpus to wipe local pages, quick-ref, and schema. The app uses the server-side web-search tool *only* during initial wiki discovery — not during normal answering.
+**Game knowledge sources:** one read-only card per game the app has seen, with the current wiki URL, crawl state, page count, and whether the quick-ref + perception schema have been built. There are no manual recovery affordances here by design — the build chain (discovery → crawl → quick-ref → perception schema) runs automatically and re-triggers on app startup, API-key-set, and window-select if it previously failed. The app uses the server-side web-search tool *only* during initial wiki discovery — not during normal answering.
 
-**Perception schema:** the per-game schema that names the slots stage-1 perception fills. Edit/save the markdown, or regenerate from the latest quick-ref.
+**Perception schema:** the per-game schema that names the slots stage-1 perception fills, viewable read-only. Built automatically from the quick-ref by the post-crawl chain.
 
 **Advanced:** model overrides for each stage (game ID, wiki discovery, perception stage-1, perception stage-2, quick-ref, schema-builder), wiki user-agent and rate limit, tool-use iteration cap. Defaults are reasonable; touch only if you know why.
 

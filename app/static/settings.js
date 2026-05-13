@@ -1,4 +1,7 @@
 // game_assistant settings page.
+// Read-only view of per-game build state. No manual-fix affordances —
+// the build chain (discovery → crawl → quick-ref → perception schema)
+// runs automatically and self-heals at the next trigger event.
 
 const MODELS = [
   "claude-sonnet-4-6",
@@ -28,17 +31,13 @@ const els = {
   gamesList: $("games-list"),
   schemaSelect: $("schema-game-select"),
   schemaEditor: $("schema-editor"),
-  schemaSave: $("schema-save-btn"),
-  schemaRegen: $("schema-regenerate-btn"),
   schemaStatus: $("schema-status"),
 };
 
 let state = {
   settings: null,
-  games: [],          // wiki/games view
+  games: [],
   currentSchemaGameId: null,
-  currentSchemaContent: "",
-  schemaDirty: false,
 };
 
 // ----- HTTP -----------------------------------------------------------------
@@ -133,7 +132,7 @@ function wireSettings() {
   els.gToolIters.addEventListener("change", () => saveSettings({ client_tool_max_iters: parseInt(els.gToolIters.value, 10) }));
 }
 
-// ----- Wiki game cards ------------------------------------------------------
+// ----- Per-game read-only status -------------------------------------------
 
 function badgeClass(crawlState) {
   if (crawlState === "done") return "ok";
@@ -163,32 +162,16 @@ function renderGames() {
         <span class="badge">${g.page_count} page${g.page_count === 1 ? "" : "s"}</span>
         ${g.has_quick_ref ? `<span class="badge ok">quick-ref</span>` : ""}
         ${g.has_perception_schema ? `<span class="badge ok">schema</span>` : ""}
+        ${g.is_supported === false ? `<span class="badge warn">unsupported</span>` : ""}
       </div>
       <div class="grid">
-        <label>Wiki URL:</label>
-        <input type="text" data-field="wiki_url" value="${escapeHtml(g.wiki_url || "")}" placeholder="https://example.fandom.com/wiki/" />
-        <label>API URL:</label>
-        <input type="text" data-field="api_url" value="${escapeHtml(g.api_url || "")}" placeholder="https://example.fandom.com/api.php" />
-        <label>Root page:</label>
-        <input type="text" data-field="root_page" value="${escapeHtml(g.root_page || "")}" placeholder="Main_Page" />
-        ${g.sitename ? `<label>Sitename:</label><span class="muted">${escapeHtml(g.sitename)}</span>` : ""}
+        ${g.wiki_url ? `<label>Wiki:</label><span class="muted small">${escapeHtml(g.wiki_url)}</span>` : ""}
+        ${g.sitename ? `<label>Sitename:</label><span class="muted small">${escapeHtml(g.sitename)}</span>` : ""}
         ${g.last_crawl_iso ? `<label>Last crawl:</label><span class="muted small">${escapeHtml(g.last_crawl_iso)}</span>` : ""}
       </div>
-      <div class="actions">
-        <button class="ghost" data-action="delete">Delete corpus</button>
-        <button class="ghost" data-action="rediscover">Re-run discovery</button>
-        <button data-action="save">Save + re-crawl</button>
-      </div>
     `;
-    const saveBtn = card.querySelector('[data-action="save"]');
-    const deleteBtn = card.querySelector('[data-action="delete"]');
-    const rediscoverBtn = card.querySelector('[data-action="rediscover"]');
-    saveBtn.addEventListener("click", () => saveGame(g.game_id, card));
-    deleteBtn.addEventListener("click", () => deleteCorpus(g.game_id, g.display_name));
-    rediscoverBtn.addEventListener("click", () => rediscover(g.game_id, g.display_name));
     els.gamesList.appendChild(card);
   }
-  // Refresh schema-editor select.
   rebuildSchemaSelect();
 }
 
@@ -203,43 +186,7 @@ async function loadGames() {
   }
 }
 
-async function saveGame(gameId, card) {
-  const fields = {};
-  for (const inp of card.querySelectorAll("input[data-field]")) {
-    fields[inp.dataset.field] = inp.value.trim();
-  }
-  try {
-    await api("PUT", `/api/wiki/games/${encodeURIComponent(gameId)}`, fields);
-    clearError();
-    await loadGames();
-  } catch (e) {
-    showError(`Save failed: ${e.message}`);
-  }
-}
-
-async function deleteCorpus(gameId, displayName) {
-  if (!confirm(`Delete the local wiki corpus for '${displayName}'? This wipes all pages, the index, quick-ref, and perception schema for this game.`)) return;
-  try {
-    await api("DELETE", `/api/wiki/games/${encodeURIComponent(gameId)}/corpus`);
-    clearError();
-    await loadGames();
-  } catch (e) {
-    showError(`Delete failed: ${e.message}`);
-  }
-}
-
-async function rediscover(gameId, displayName) {
-  if (!confirm(`Wipe the local wiki for '${displayName}' and re-run discovery + crawl from scratch?`)) return;
-  try {
-    await api("POST", `/api/wiki/games/${encodeURIComponent(gameId)}/rediscover`, {});
-    clearError();
-    await loadGames();
-  } catch (e) {
-    showError(`Re-run discovery failed: ${e.message}`);
-  }
-}
-
-// ----- Perception schema editor --------------------------------------------
+// ----- Perception schema (read-only view) ----------------------------------
 
 function rebuildSchemaSelect() {
   const prev = els.schemaSelect.value;
@@ -249,12 +196,10 @@ function rebuildSchemaSelect() {
   none.textContent = "(pick a game)";
   els.schemaSelect.appendChild(none);
   for (const g of state.games) {
-    if (!g.has_perception_schema && !g.has_quick_ref) continue;
+    if (!g.has_perception_schema) continue;
     const opt = document.createElement("option");
     opt.value = g.game_id;
-    opt.textContent = g.has_perception_schema
-      ? `${g.display_name}`
-      : `${g.display_name} (no schema yet — regenerate to build)`;
+    opt.textContent = g.display_name;
     els.schemaSelect.appendChild(opt);
   }
   if (prev && [...els.schemaSelect.options].some(o => o.value === prev)) {
@@ -265,8 +210,6 @@ function rebuildSchemaSelect() {
 async function loadSchema() {
   const gameId = els.schemaSelect.value;
   state.currentSchemaGameId = gameId || null;
-  state.schemaDirty = false;
-  els.schemaSave.disabled = true;
   if (!gameId) {
     els.schemaEditor.value = "";
     els.schemaStatus.textContent = "";
@@ -275,70 +218,21 @@ async function loadSchema() {
   els.schemaStatus.textContent = "Loading…";
   try {
     const res = await api("GET", `/api/perception/schema/${encodeURIComponent(gameId)}`);
-    state.currentSchemaContent = res.content || "";
-    els.schemaEditor.value = state.currentSchemaContent;
-    els.schemaStatus.textContent = `${state.currentSchemaContent.length} chars on disk`;
+    els.schemaEditor.value = res.content || "";
+    els.schemaStatus.textContent = `${(res.content || "").length} chars on disk`;
     clearError();
   } catch (e) {
     els.schemaEditor.value = "";
     els.schemaStatus.textContent = "";
-    if (e.message.includes("404")) {
-      showError(`No _perception_schema.md exists yet for ${gameId}. Click Regenerate to build one from the quick-ref.`);
-    } else {
-      showError(`Load schema failed: ${e.message}`);
-    }
-  }
-}
-
-function onSchemaEdit() {
-  state.schemaDirty = els.schemaEditor.value !== state.currentSchemaContent;
-  els.schemaSave.disabled = !state.schemaDirty || !state.currentSchemaGameId;
-}
-
-async function saveSchema() {
-  if (!state.currentSchemaGameId) return;
-  const content = els.schemaEditor.value;
-  try {
-    const res = await api(
-      "PUT",
-      `/api/perception/schema/${encodeURIComponent(state.currentSchemaGameId)}`,
-      { content },
-    );
-    state.currentSchemaContent = res.content;
-    state.schemaDirty = false;
-    els.schemaSave.disabled = true;
-    els.schemaStatus.textContent = `Saved (${content.length} chars).`;
-    clearError();
-    await loadGames();
-  } catch (e) {
-    showError(`Save schema failed: ${e.message}`);
-  }
-}
-
-async function regenerateSchema() {
-  const gameId = els.schemaSelect.value || state.currentSchemaGameId;
-  if (!gameId) {
-    showError("Pick a game first.");
-    return;
-  }
-  if (!confirm("Rebuild the perception schema from the quick-ref for this game? Existing edits to _perception_schema.md will be overwritten.")) return;
-  try {
-    await api("POST", `/api/perception/schema/${encodeURIComponent(gameId)}/regenerate`, {});
-    els.schemaStatus.textContent = "Regenerating in background…";
-    clearError();
-  } catch (e) {
-    showError(`Regenerate failed: ${e.message}`);
+    showError(`Load schema failed: ${e.message}`);
   }
 }
 
 function wireSchema() {
   els.schemaSelect.addEventListener("change", loadSchema);
-  els.schemaEditor.addEventListener("input", onSchemaEdit);
-  els.schemaSave.addEventListener("click", saveSchema);
-  els.schemaRegen.addEventListener("click", regenerateSchema);
 }
 
-// ----- WebSocket: refresh games/schema when crawler reports progress -------
+// ----- WebSocket: refresh games view on build-chain events ------------------
 
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -346,9 +240,13 @@ function connectWs() {
   ws.onmessage = async (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (["crawl_done", "crawl_error", "wiki_discovered", "wiki_not_found", "corpus_ready", "perception_schema_rebuilt"].includes(msg.type)) {
+      if ([
+        "crawl_done", "crawl_error",
+        "wiki_discovered", "wiki_not_found", "wiki_discovery_failed",
+        "corpus_ready", "quick_ref_done", "schema_done",
+      ].includes(msg.type)) {
         await loadGames();
-        if (msg.type === "perception_schema_rebuilt" && state.currentSchemaGameId === msg.game_id) {
+        if (state.currentSchemaGameId === msg.game_id) {
           await loadSchema();
         }
       } else if (msg.type === "settings_changed") {
