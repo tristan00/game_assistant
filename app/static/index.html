@@ -16,6 +16,12 @@
       <button id="capture-btn">Capture</button>
     </div>
 
+    <!-- Game identity row -->
+    <div class="row">
+      <span id="game-status" class="grow muted">Game: — (pick a window)</span>
+      <button id="reidentify-btn" class="ghost" disabled title="Force a fresh LLM identification of the current window">Re-identify</button>
+    </div>
+
     <!-- Session row -->
     <div class="row">
       <span id="session-label" class="grow muted">Active session: — (0 shots)</span>
@@ -31,25 +37,22 @@
       <select id="model-select"></select>
       <label>Last N:</label>
       <input id="last-n-input" type="number" min="1" max="20" value="5" />
-      <label>Web searches:</label>
-      <input id="web-search-input" type="number" min="0" max="10" value="2"
-             title="Max web searches per request. 0 disables. Each search adds latency and cost." />
       <span class="grow"></span>
-      <button id="settings-btn" class="ghost">Settings…</button>
+      <a href="/settings" class="ghost button-link">Settings…</a>
       <button id="api-key-btn" class="ghost">API key…</button>
     </div>
 
-    <!-- Strategy -->
+    <!-- Goal -->
     <div class="row">
-      <label>Strategy:</label>
-      <select id="strategy-select" class="grow"></select>
-      <button id="new-strategy-btn">+ New</button>
-      <button id="edit-strategy-btn">Edit</button>
-      <button id="save-strategy-btn" disabled>Save</button>
-      <button id="delete-strategy-btn">Delete</button>
+      <label>Goal:</label>
+      <select id="goal-select" class="grow"></select>
+      <button id="new-goal-btn">+ New</button>
+      <button id="edit-goal-btn">Edit</button>
+      <button id="save-goal-btn" disabled>Save</button>
+      <button id="delete-goal-btn">Delete</button>
     </div>
-    <textarea id="strategy-editor" rows="6" readonly
-              placeholder="Optional persistent strategy/campaign overview the assistant will use to shape its analysis. Pick a strategy (or click + New), then click Edit to modify, Save to write to disk."></textarea>
+    <textarea id="goal-editor" class="hidden" rows="6" readonly
+              placeholder="Optional persistent goal/campaign overview the assistant will use to shape its analysis."></textarea>
 
     <!-- Question -->
     <label class="question-label">Question (Enter to submit, Shift+Enter for newline):</label>
@@ -70,30 +73,6 @@
     <!-- Footer -->
     <div id="status" class="muted">Pick a window. Capture starts automatically.</div>
     <div class="muted small">Manual capture: click Capture or press <span id="hotkey-hint">Ctrl+Alt+S</span></div>
-  </div>
-
-  <!-- Settings modal -->
-  <div id="settings-modal" class="modal hidden">
-    <div class="modal-content">
-      <h3>Settings</h3>
-      <div class="form">
-        <label>Model:</label>
-        <select id="settings-model"></select>
-        <label>Capture interval (s):</label>
-        <input id="settings-interval" type="number" min="5" max="3600" />
-        <label>Last N images sent:</label>
-        <input id="settings-last-n" type="number" min="1" max="20" />
-        <label>Web searches per request (max):</label>
-        <input id="settings-web-search" type="number" min="0" max="10" />
-        <label>Global hotkey:</label>
-        <input id="settings-hotkey" type="text" placeholder="Ctrl+Alt+S" />
-      </div>
-      <p class="muted small">All settings apply immediately on Save and persist across launches.</p>
-      <div class="modal-actions">
-        <button id="settings-cancel" class="ghost">Cancel</button>
-        <button id="settings-save">Save</button>
-      </div>
-    </div>
   </div>
 
   <!-- API key modal -->
